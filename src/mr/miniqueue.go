@@ -26,16 +26,6 @@ func (q *Queue) Out() (Comparable, error) {
 	return item, nil  
 }
 
-//查找某个元素的下标(对于普通类型)
-func (q *Queue) FindIndexNormal(item Comparable) int {  
-	for i, v := range q.items {  
-		if v == item {  
-			return i  
-		}  
-	}  
-	return -1  
-}
-
 //查找某个元素的下标(对于自定义类型)
 func (q *Queue) FindIndex(item Comparable) int {
 	for i,v:=range q.items {

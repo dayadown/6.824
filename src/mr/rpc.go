@@ -26,6 +26,7 @@ type ExampleReply struct {
 
 type RpcArgs struct{
 	Num int//worker编号
+	WorkNum int//任务编号
 }
 
 type RpcReply struct{

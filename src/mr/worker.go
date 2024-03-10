@@ -109,6 +109,13 @@ func Worker(mapf func(string, string) []KeyValue,
 				_, err = file.Write(jsonData)
 				file.Close();
 			}
+			//构造请求信息
+			args:=RpcArgs{
+				Num:reply.Work.WorkerNum,//worker编号
+				WorkNum:workNum,//任务编号
+			}
+			FinishWork(args)
+			//告诉msater任务完成
 		}else{//是reduce任务
 			continue
 		}
@@ -116,13 +123,14 @@ func Worker(mapf func(string, string) []KeyValue,
 	// uncomment to send the Example RPC to the master.
 	//CallExample()
 }
-//R完成任务
+//完成任务
 func FinishWork(args RpcArgs) {
-
+	reply := RpcReply{}
+	call("Master.RPCFinish", &args, &reply)
 }
 
 
-//R获取任务
+//获取任务
 func GetWork() RpcReply {
 
 	// declare an argument structure.
@@ -143,6 +151,7 @@ func GetWork() RpcReply {
 	return reply
 
 }
+
 
 //
 // send an RPC request to the master, wait for the response.
