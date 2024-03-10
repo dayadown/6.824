@@ -4,6 +4,7 @@ import "fmt"
 import "log"
 import "net/rpc"
 import "hash/fnv"
+import "time"
 
 
 //
@@ -32,33 +33,47 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-
+	//for{
+		reply:=GetWork();
+		//输出得到的文件名和任务序号
+		fmt.Println("reply.Worknum:", reply.Work.Num)
+		fmt.Println("reply.Info:",reply.Work.Info)
+		if reply.Work.Info=="wait......" {
+			time.Sleep(5*time.Second)
+		}
+		fmt.Println("当前worker编号:",reply.Work.WorkerNum)
+		fmt.Println(reply.Work.Filename)
+	//}
 	// uncomment to send the Example RPC to the master.
-	// CallExample()
+	//CallExample()
+
+}
+//R完成任务
+func FinishWork(args RpcArgs) {
 
 }
 
-//
-// example function to show how to make an RPC call to the master.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
+
+//R获取任务
+func GetWork() RpcReply {
 
 	// declare an argument structure.
-	args := ExampleArgs{}
+	//args := ExampleArgs{}
+	args := RpcArgs{}
 
 	// fill in the argument(s).
-	args.X = 99
+	//args.X = 99
 
 	// declare a reply structure.
-	reply := ExampleReply{}
+	//reply := ExampleReply{}
+	reply := RpcReply{}
 
 	// send the RPC request, wait for the reply.
-	call("Master.Example", &args, &reply)
+	call("Master.RPC", &args, &reply)
 
-	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
+	//返回得到的任务信息
+	return reply
+
 }
 
 //
