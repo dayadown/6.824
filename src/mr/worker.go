@@ -9,6 +9,8 @@ import "strconv"
 import "encoding/json"
 import "io/ioutil"
 import "os"
+import "strings"
+import "sort"
 
 //
 // Map functions return a slice of KeyValue.
@@ -64,7 +66,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		//输出得到的文件名和任务序号
 		fmt.Println("reply.Worknum:", reply.Work.Num)
 		fmt.Println("reply.Info:",reply.Work.Info)
-		if reply.Work.Info=="wait......" {
+		if reply.Work.Info=="wait......" {//TODO改为设置状态码，不然提示信息一变就无法跳过for循环
 			time.Sleep(5*time.Second)
 			continue
 		}
@@ -91,13 +93,15 @@ func Worker(mapf func(string, string) []KeyValue,
 			file.Close()
 			//传入<文件名，文件内容>这个键值对给map函数,kva接收中间键值对数组
 			kva := mapf(filename, string(content))
+			// 创建一个buffer来写入格式化后的JSON  
 			//中间键值对写入文件
 			//TODO 直接改map，map每遍历到一个word就输出到对应的文件
 			for i:=0;i<len(kva);i++{
+				var buffer []byte
 				hashcode:=ihash(kva[i].Key)
 				target:=hashcode%nmidFiles
 				//创建文件，文件命名规范:mr_mid_第几个reduce任务(target)_该map任务的任务序号
-				oname := "mr_mid_"+strconv.Itoa(target)+"_"+strconv.Itoa(workNum)+".json"
+				oname := "mr_mid_"+strconv.Itoa(target)+"_"+strconv.Itoa(workNum)+".jsonl"
 				//打开文件，若没有就创建
 				file, err := os.OpenFile(oname, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
 				if err != nil {  
@@ -106,18 +110,93 @@ func Worker(mapf func(string, string) []KeyValue,
 				}
 				//当前遍历到的KeyValue转json
 				jsonData, err := json.Marshal(kva[i]) 
-				_, err = file.Write(jsonData)
+				//_, err = file.Write(jsonData)
+				//写入buffer,并添加一个换行符号
+				buffer = append(buffer, jsonData...)  
+				buffer = append(buffer, '\n')
+				//err1 := os.WriteFile(file, buffer, 0644)
+				_, err = file.Write(buffer)
+				if err != nil {  
+					fmt.Printf("Error writing to file: %v\n", err)  
+					return  
+				}  
 				file.Close();
+			}
+			args:=RpcArgs{
+				Num:reply.Work.WorkerNum,//worker编号
+				WorkNum:workNum,//任务编号
+			}
+			//告诉msater任务完成
+			FinishWork(args)
+		}else{//是reduce任务
+			//记录任务编号
+			workNum:=reply.Work.Num
+			fmt.Println("当前worker编号:",reply.Work.WorkerNum)
+			fmt.Println("当前处理的文件名：",reply.Work.Filename)
+			filename:=reply.Work.Filename
+			//开始读入文件
+			jsonData, err := ioutil.ReadFile(filename+".json")  
+			if err != nil {  
+				log.Fatalf("Error reading JSON file: %v", err)  
+			}
+			// 将内容按行分割  
+			lines := strings.Split(string(jsonData), "\n")
+			fmt.Println(len(lines))
+			// 定义一个Person类型的切片  
+			var kvs ByKey  
+		
+			// 遍历每一行并解析JSON对象，放入kvs切片中
+			for _, line := range lines {  
+				var kv KeyValue  
+				// 跳过空行  
+				if line == "" {  
+					continue  
+				}  
+				// 解析JSON对象到kv变量中  
+				err := json.Unmarshal([]byte(line), &kv)  
+				if err != nil {  
+					log.Printf("Error parsing JSON line: %v", err)  
+					continue  
+				}  
+				// 将解析后的对象添加到切片中  
+				kvs = append(kvs, kv)
+			}
+
+			fmt.Println("对切片排序")
+			//对切片排序
+			sort.Sort(kvs);
+			fmt.Println("排序完成")
+			
+			//创建输出文件
+			outputName:="mr-out-"+strconv.Itoa(workNum)
+			outputFile, _ := os.Create(outputName)
+			
+			//找出kvs切片中key相同的，并传给reduce记数
+			i := 0
+			for i < len(kvs) {
+				j := i + 1
+				for j < len(kvs) && kvs[j].Key == kvs[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, kvs[k].Value)
+				}
+				output := reducef(kvs[i].Key, values)
+
+				// this is the correct format for each line of Reduce output.
+				//按格式写入文件
+				fmt.Fprintf(outputFile, "%v %v\n", kvs[i].Key, output)
+
+				i = j
 			}
 			//构造请求信息
 			args:=RpcArgs{
 				Num:reply.Work.WorkerNum,//worker编号
 				WorkNum:workNum,//任务编号
 			}
-			FinishWork(args)
 			//告诉msater任务完成
-		}else{//是reduce任务
-			continue
+			FinishWork(args)
 		}
 	}
 	// uncomment to send the Example RPC to the master.

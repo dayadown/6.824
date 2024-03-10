@@ -191,6 +191,12 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 				}
 				reply.Work=work
 				return nil
+			}else{//reduce任务队列也没了，分发出去的reduce也做完了，改状态（TODO 状态设置有点问题），先等待
+				work:=Works{
+					Info:"wait......",
+				}
+				reply.Work=work
+				return nil
 			}
 		}
 	}
@@ -206,10 +212,15 @@ func (m *Master) RPCFinish(args *RpcArgs, reply *RpcReply) error {
 	work:=Works{
 		Num:workNum,
 	}
-	//删除队列中的worker和任务
-	m.mapworkQueue2.Delete(m.mapworkQueue2.FindIndex(work));
-	m.workerQueue.Delete(m.workerQueue.FindIndexNormal(num));
-	//fmt.Println(m.mapworkQueue2.FindIndex(work))
+	if m.status==0 {
+		//删除队列中的worker和任务
+		fmt.Println("删除队列中的worker和任务")
+		m.mapworkQueue2.Delete(m.mapworkQueue2.FindIndex(work));
+		m.workerQueue.Delete(m.workerQueue.FindIndexNormal(num));
+	}else if m.status==1 {
+		m.reduceworkQueue2.Delete(m.reduceworkQueue2.FindIndex(work));
+		m.workerQueue.Delete(m.workerQueue.FindIndexNormal(num));
+	}
 	return nil
 }
 //
