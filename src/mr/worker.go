@@ -70,6 +70,9 @@ func Worker(mapf func(string, string) []KeyValue,
 			time.Sleep(5*time.Second)
 			continue
 		}
+		if(reply.Work.Info=="finish!"){//任务完成，退出！
+			break;
+		}
 		//记录任务类型：map or reduce
 		typee:=reply.Work.Typee
 		if typee==0{//是map任务
@@ -162,10 +165,8 @@ func Worker(mapf func(string, string) []KeyValue,
 				kvs = append(kvs, kv)
 			}
 
-			fmt.Println("对切片排序")
 			//对切片排序
 			sort.Sort(kvs);
-			fmt.Println("排序完成")
 			
 			//创建输出文件
 			outputName:="mr-out-"+strconv.Itoa(workNum)

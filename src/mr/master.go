@@ -44,7 +44,7 @@ type Master struct {
 	reduceworkQueue1 *Queue//未被分配的reduce任务
 	reduceworkQueue2 *Queue//已被分配但未完成的reduce任务
 	workerNumStream int//worker编号流，用于递增产生编号
-	status int//记录整个mapreduce任务的阶段,0:map阶段  1:map后创建reduce任务阶段 2:reduce阶段  3:完成阶段
+	status int//记录整个mapreduce任务的阶段,0:map阶段  1:map后创建reduce任务阶段 2：完成
 	NFinalmidFiles int//中间文件数量
 
 }
@@ -78,8 +78,10 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 		return nil
 	}else {
 		
-		//该创建reduce任务了
+		//上一阶段是map阶段，那现在该创建reduce任务了
 		if m.status==0{
+			//修改状态为创建reduce任务阶段
+			m.status=1
 			fmt.Println("所有map任务完成,等待创建reduce任务。。。。")
 			work:=Works{
 				Info:"wait......",
@@ -164,9 +166,8 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 				}
 				m.reduceworkQueue1.Add(reduceWork)  
 			}
-			m.status=1
 			return nil
-		}else if m.status==1 {//reduce任务创建完成，可以分发reduce任务
+		}else if m.status==1 {//上一阶段为创建reduce任务阶段，现在该分发reduce任务了
 			if m.reduceworkQueue1.Size()>0 {
 				workTemp,_:= m.reduceworkQueue1.Out()
 				work, ok := workTemp.(Works)
@@ -191,13 +192,20 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 				}
 				reply.Work=work
 				return nil
-			}else{//reduce任务队列也没了，分发出去的reduce也做完了，改状态（TODO 状态设置有点问题），先等待
+			}else{//reduce任务队列也没了，分发出去的reduce也做完了，改状态为完成
+				m.status=2
 				work:=Works{
-					Info:"wait......",
+					Info:"finish!",
 				}
 				reply.Work=work
 				return nil
 			}
+		}else{//完成
+			work:=Works{
+				Info:"finish!",
+			}
+			reply.Work=work
+			return nil
 		}
 	}
 	return nil
@@ -258,6 +266,9 @@ func (m *Master) Done() bool {
 	ret := false
 
 	// Your code here.
+	if m.status==2{
+		ret=true
+	}
 
 
 	return ret
