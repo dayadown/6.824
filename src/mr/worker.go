@@ -64,8 +64,8 @@ func Worker(mapf func(string, string) []KeyValue,
 	for{
 		reply:=GetWork();
 		//输出得到的文件名和任务序号
-		fmt.Println("reply.Worknum:", reply.Work.Num)
-		fmt.Println("reply.Info:",reply.Work.Info)
+		//fmt.Println("reply.Worknum:", reply.Work.Num)
+		//fmt.Println("reply.Info:",reply.Work.Info)
 		if reply.Work.Info=="wait......" {//TODO改为设置状态码，不然提示信息一变就无法跳过for循环
 			time.Sleep(5*time.Second)
 			continue
@@ -80,8 +80,8 @@ func Worker(mapf func(string, string) []KeyValue,
 			nmidFiles:=reply.Work.NmidFiles
 			//记录任务序号
 			workNum:=reply.Work.Num
-			fmt.Println("当前worker编号:",reply.Work.WorkerNum)
-			fmt.Println("当前处理的文件名：",reply.Work.Filename)
+			//fmt.Println("当前worker编号:",reply.Work.WorkerNum)
+			//fmt.Println("当前处理的文件名：",reply.Work.Filename)
 			filename:=reply.Work.Filename
 			//开始读入文件
 			file, err := os.Open(filename)
@@ -134,8 +134,8 @@ func Worker(mapf func(string, string) []KeyValue,
 		}else{//是reduce任务
 			//记录任务编号
 			workNum:=reply.Work.Num
-			fmt.Println("当前worker编号:",reply.Work.WorkerNum)
-			fmt.Println("当前处理的文件名：",reply.Work.Filename)
+			//fmt.Println("当前worker编号:",reply.Work.WorkerNum)
+			//fmt.Println("当前处理的文件名：",reply.Work.Filename)
 			filename:=reply.Work.Filename
 			//开始读入文件
 			jsonData, err := ioutil.ReadFile(filename+".json")  
@@ -144,7 +144,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			// 将内容按行分割  
 			lines := strings.Split(string(jsonData), "\n")
-			fmt.Println(len(lines))
+			//fmt.Println(len(lines))
 			// 定义一个Person类型的切片  
 			var kvs ByKey  
 		

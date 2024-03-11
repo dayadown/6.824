@@ -10,6 +10,9 @@ import "strconv"
 import "path/filepath"
 import "strings"
 import "io/ioutil"
+import "sync"
+
+var mutex sync.Mutex//定义全局锁
 
 // 任务的信息
 type Works struct{
@@ -51,6 +54,9 @@ type Master struct {
 
 // Your code here -- RPC handlers for the worker to call.
 func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
+	//加锁
+	mutex.Lock()
+	defer mutex.Unlock()//defer确保锁释放（防止有时候程序运行到一半就异常退出，没有执行到释放锁的地方）
 	//有未被分配的map任务
 	if m.mapworkQueue1.Size()>0 {
 		workTemp,_:= m.mapworkQueue1.Out()
@@ -82,7 +88,7 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 		if m.status==0{
 			//修改状态为创建reduce任务阶段
 			m.status=1
-			fmt.Println("所有map任务完成,等待创建reduce任务。。。。")
+			//fmt.Println("所有map任务完成,等待创建reduce任务。。。。")
 			work:=Works{
 				Info:"wait......",
 			}
@@ -139,7 +145,7 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 									return nil  
 								}  
 			
-								fmt.Println("Deleted file:", path)
+								//fmt.Println("Deleted file:", path)
 							}
 						}  
 						return nil  
@@ -213,6 +219,9 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 
 //接受任务完成的请求
 func (m *Master) RPCFinish(args *RpcArgs, reply *RpcReply) error {
+	//加锁
+	mutex.Lock()
+	defer mutex.Unlock()
 	//完成任务的worker编号
 	num:=args.Num
 	//完成的任务编号
@@ -222,7 +231,7 @@ func (m *Master) RPCFinish(args *RpcArgs, reply *RpcReply) error {
 	}
 	if m.status==0 {
 		//删除队列中的worker和任务
-		fmt.Println("删除队列中的worker和任务")
+		//fmt.Println("删除队列中的worker和任务")
 		m.mapworkQueue2.Delete(m.mapworkQueue2.FindIndex(work));
 		m.workerQueue.Delete(m.workerQueue.FindIndexNormal(num));
 	}else if m.status==1 {
