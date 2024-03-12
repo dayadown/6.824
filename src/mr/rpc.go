@@ -23,7 +23,7 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
-
+//worker向master的RPC
 type RpcArgs struct{
 	Num int//worker编号
 	WorkNum int//任务编号
@@ -34,6 +34,7 @@ type RpcReply struct{
 	Info int//得到的消息信息
 	Num int//worker编号
 }
+
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.

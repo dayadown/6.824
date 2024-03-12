@@ -11,8 +11,10 @@ import "path/filepath"
 import "strings"
 import "io/ioutil"
 import "sync"
+import "time"
 
 var mutex sync.Mutex//定义全局锁
+var times int = 1
 
 // 任务的信息
 type Works struct{
@@ -77,6 +79,74 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 		m.mapworkQueue2.Add(work)
 		return nil
 	}else if m.mapworkQueue2.Size()>0{//有map任务未完成，通知worker等待
+		
+		if times==0{//有worker挂了
+			fmt.Println("有worker挂了....")
+			//将mapworkQueue2中的任务重新放回mapworkQueue1
+			for i:=0;i<m.mapworkQueue2.Size();i++{
+				workredo,_:=m.mapworkQueue2.Out()
+				m.workerQueue.Out()
+				//类型转换
+				workRedo,ok:=workredo.(Works)
+				if(ok){
+					m.mapworkQueue1.Add(workRedo)
+					//删除其产生的中间文件
+					// 设置当前目录为搜索起点  
+					startDir := "."
+					midFile:="_"+strconv.Itoa(workRedo.Num)+".jsonl"
+					hasMoreFiles:=true 
+					for hasMoreFiles {  
+						hasMoreFiles = false  
+				
+						// 使用filepath.Walk遍历目录  
+						err := filepath.Walk(startDir, func(path string, info os.FileInfo, err error) error {  
+							if err != nil {  
+								fmt.Printf("prevent panic by handling failure accessing a path %q: %v\n", path, err)  
+								return err  
+							}  
+							if !info.IsDir() { // 忽略目录  
+								// 检查文件名是否以"_i.jsonl"结尾  
+								if strings.HasSuffix(filepath.Base(path), midFile) {  
+									hasMoreFiles = true // 标记还有文件需要处理     
+				
+									// 删除中间文件  
+									err = os.Remove(path)  
+									if err != nil {  
+										fmt.Printf("Error deleting file %s: %v\n", path, err)  
+										return nil  
+									}  
+								}
+							}  
+							return nil  
+						})  
+				
+						if err != nil {  
+							fmt.Printf("Error walking the path %v: %v\n", startDir, err)  
+							break  
+						}  
+				
+						// 如果没有找到任何文件，退出循环  
+						if !hasMoreFiles {  
+							break  
+						}  
+					}
+				}else{
+					log.Fatalf("cannot convert!")
+				}
+			}
+
+			//重置计数器
+			times=1
+
+			work:=Works{
+				Info:"wait......",
+			}
+			reply.Work=work
+			return nil
+		}
+		times--
+		//等10s
+		time.Sleep(10*time.Second)
 		work:=Works{
 			Info:"wait......",
 		}
@@ -193,6 +263,31 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 				m.reduceworkQueue2.Add(work)
 				return nil
 			}else if m.reduceworkQueue2.Size()>0 {//有reduce任务未完成，通知等待
+				//每次通知worker等待后都将times-1，减到0就认为有worker挂了没执行完任务，将任务重新扔回queue1
+				
+				if times==0{//有worker挂了
+					fmt.Println("有worker挂了....")
+					//将mapworkQueue2中的任务重新放回mapworkQueue1
+					for i:=0;i<m.mapworkQueue2.Size();i++{
+						workredo,_:=m.mapworkQueue2.Out()
+						//类型转换
+						workRedo,ok:=workredo.(Works)
+						if(ok){
+							m.mapworkQueue1.Add(workRedo)
+						}else{
+							log.Fatalf("cannot convert!")
+						}
+					}
+					//重置计数器
+					times=1
+					work:=Works{
+						Info:"wait......",
+					}
+					reply.Work=work
+					return nil
+				}
+				times--
+				time.Sleep(10*time.Second)
 				work:=Works{
 					Info:"wait......",
 				}

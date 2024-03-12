@@ -86,7 +86,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			//开始读入文件
 			file, err := os.Open(filename)
 			if err != nil {
-				log.Fatalf("cannot open %v", filename)
+				log.Fatalf("woker拿到任务但是不能打开文件:",filename)
 			}
 			//文件内容放入content中
 			content, err := ioutil.ReadAll(file)
