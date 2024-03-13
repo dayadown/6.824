@@ -81,7 +81,7 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 	}else if m.mapworkQueue2.Size()>0{//有map任务未完成，通知worker等待
 		
 		if times==0{//有worker挂了
-			fmt.Println("有worker挂了....")
+			fmt.Println("有mapworker挂了....")
 			//将mapworkQueue2中的任务重新放回mapworkQueue1
 			for i:=0;i<m.mapworkQueue2.Size();i++{
 				workredo,_:=m.mapworkQueue2.Out()
@@ -90,46 +90,8 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 				workRedo,ok:=workredo.(Works)
 				if(ok){
 					m.mapworkQueue1.Add(workRedo)
-					//删除其产生的中间文件
-					// 设置当前目录为搜索起点  
-					startDir := "."
-					midFile:="_"+strconv.Itoa(workRedo.Num)+".jsonl"
-					hasMoreFiles:=true 
-					for hasMoreFiles {  
-						hasMoreFiles = false  
-				
-						// 使用filepath.Walk遍历目录  
-						err := filepath.Walk(startDir, func(path string, info os.FileInfo, err error) error {  
-							if err != nil {  
-								fmt.Printf("prevent panic by handling failure accessing a path %q: %v\n", path, err)  
-								return err  
-							}  
-							if !info.IsDir() { // 忽略目录  
-								// 检查文件名是否以"_i.jsonl"结尾  
-								if strings.HasSuffix(filepath.Base(path), midFile) {  
-									hasMoreFiles = true // 标记还有文件需要处理     
-				
-									// 删除中间文件  
-									err = os.Remove(path)  
-									if err != nil {  
-										fmt.Printf("Error deleting file %s: %v\n", path, err)  
-										return nil  
-									}  
-								}
-							}  
-							return nil  
-						})  
-				
-						if err != nil {  
-							fmt.Printf("Error walking the path %v: %v\n", startDir, err)  
-							break  
-						}  
-				
-						// 如果没有找到任何文件，退出循环  
-						if !hasMoreFiles {  
-							break  
-						}  
-					}
+					//删除其产生的中间文件,
+					//这里删或不删都可以，因为文件前缀即为workerNum（唯一），若不是正常工作的worker产生的中间文件不会被处理
 				}else{
 					log.Fatalf("cannot convert!")
 				}
@@ -159,11 +121,6 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 			//修改状态为创建reduce任务阶段
 			m.status=1
 			//fmt.Println("所有map任务完成,等待创建reduce任务。。。。")
-			work:=Works{
-				Info:"wait......",
-			}
-			reply.Work=work
-
 			//收集map产生的中间文件,并产生终极中间文件
 			for i:=0;i<m.NFinalmidFiles;i++ {
 				// 设置当前目录为搜索起点  
@@ -242,6 +199,10 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 				}
 				m.reduceworkQueue1.Add(reduceWork)  
 			}
+			work:=Works{
+				Info:"wait......",
+			}
+			reply.Work=work
 			return nil
 		}else if m.status==1 {//上一阶段为创建reduce任务阶段，现在该分发reduce任务了
 			if m.reduceworkQueue1.Size()>0 {
@@ -266,14 +227,14 @@ func (m *Master) RPC(args *RpcArgs, reply *RpcReply) error {
 				//每次通知worker等待后都将times-1，减到0就认为有worker挂了没执行完任务，将任务重新扔回queue1
 				
 				if times==0{//有worker挂了
-					fmt.Println("有worker挂了....")
+					fmt.Println("有reduceworker挂了....")
 					//将mapworkQueue2中的任务重新放回mapworkQueue1
-					for i:=0;i<m.mapworkQueue2.Size();i++{
-						workredo,_:=m.mapworkQueue2.Out()
+					for i:=0;i<m.reduceworkQueue2.Size();i++{
+						workredo,_:=m.reduceworkQueue2.Out()
 						//类型转换
 						workRedo,ok:=workredo.(Works)
 						if(ok){
-							m.mapworkQueue1.Add(workRedo)
+							m.reduceworkQueue1.Add(workRedo)
 						}else{
 							log.Fatalf("cannot convert!")
 						}
@@ -328,10 +289,94 @@ func (m *Master) RPCFinish(args *RpcArgs, reply *RpcReply) error {
 		//删除队列中的worker和任务
 		//fmt.Println("删除队列中的worker和任务")
 		m.mapworkQueue2.Delete(m.mapworkQueue2.FindIndex(work));
-		m.workerQueue.Delete(m.workerQueue.FindIndexNormal(num));
+		err:=m.workerQueue.Delete(m.workerQueue.FindIndexNormal(num));
+		//master监视的正在工作的worker队列有该worker，说明他确实工作完成，对其生产的中间文件重命名
+		if err==nil{
+			todoFilename:=strconv.Itoa(num)+"_"
+			hasMoreFiles := true  
+			
+			for hasMoreFiles {  
+				hasMoreFiles = false  
+				startDir:="."
+				// 使用filepath.Walk遍历目录  
+				err := filepath.Walk(startDir, func(path string, info os.FileInfo, err error) error {  
+					if err != nil {  
+						fmt.Printf("prevent panic by handling failure accessing a path %q: %v\n", path, err)  
+						return err  
+					}  
+					if !info.IsDir() { // 忽略目录  
+						// 检查文件名是否以"workerNum_"开头  
+						if strings.HasPrefix(filepath.Base(path), todoFilename) {  
+							hasMoreFiles = true // 标记还有文件需要处理    
+							index:=strings.Index(path, "_")
+							// 重命名文件
+							newPath:= path[index+1:]
+							err := os.Rename(path, newPath)  
+							if err != nil {  
+								fmt.Printf("Error renaming file %s to %s: %v\n", path, newPath, err)  
+							}
+						}
+					}  
+					return nil  
+				})  
+		
+				if err != nil {  
+					fmt.Printf("Error walking the path %v: %v\n", startDir, err)  
+					break  
+				}  
+		
+				// 如果没有找到任何文件，退出循环  
+				if !hasMoreFiles {  
+					break  
+				}  
+			}
+		}
+		//否则说明该worker已经被认为挂掉了，对其文件不做处理
 	}else if m.status==1 {
 		m.reduceworkQueue2.Delete(m.reduceworkQueue2.FindIndex(work));
-		m.workerQueue.Delete(m.workerQueue.FindIndexNormal(num));
+		err:=m.workerQueue.Delete(m.workerQueue.FindIndexNormal(num));
+		//master监视的正在工作的worker队列有该worker，说明他确实工作完成，对其生产的中间文件重命名
+		if err==nil{
+			todoFilename:=strconv.Itoa(num)+"_"
+			hasMoreFiles := true  
+			
+			for hasMoreFiles {  
+				hasMoreFiles = false  
+				startDir:="."
+				// 使用filepath.Walk遍历目录  
+				err := filepath.Walk(startDir, func(path string, info os.FileInfo, err error) error {  
+					if err != nil {  
+						fmt.Printf("prevent panic by handling failure accessing a path %q: %v\n", path, err)  
+						return err  
+					}  
+					if !info.IsDir() { // 忽略目录  
+						// 检查文件名是否以"workerNum_"开头  
+						if strings.HasPrefix(filepath.Base(path), todoFilename) {  
+							hasMoreFiles = true // 标记还有文件需要处理    
+							index:=strings.Index(path, "_")
+							// 重命名文件
+							newPath:= path[index+1:]
+							err := os.Rename(path, newPath)  
+							if err != nil {  
+								fmt.Printf("Error renaming file %s to %s: %v\n", path, newPath, err)  
+							}
+						}
+					}  
+					return nil  
+				})  
+		
+				if err != nil {  
+					fmt.Printf("Error walking the path %v: %v\n", startDir, err)  
+					break  
+				}  
+		
+				// 如果没有找到任何文件，退出循环  
+				if !hasMoreFiles {  
+					break  
+				}  
+			}
+		}
+		//否则说明该worker已经被认为挂掉了，对其文件不做处理
 	}
 	return nil
 }

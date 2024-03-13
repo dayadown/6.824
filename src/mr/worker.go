@@ -82,7 +82,10 @@ func Worker(mapf func(string, string) []KeyValue,
 			workNum:=reply.Work.Num
 			//fmt.Println("当前worker编号:",reply.Work.WorkerNum)
 			//fmt.Println("当前处理的文件名：",reply.Work.Filename)
+			//记录任务文件名
 			filename:=reply.Work.Filename
+			//记录worker的编号
+			workerNum:=reply.Work.WorkerNum
 			//开始读入文件
 			file, err := os.Open(filename)
 			if err != nil {
@@ -96,15 +99,15 @@ func Worker(mapf func(string, string) []KeyValue,
 			file.Close()
 			//传入<文件名，文件内容>这个键值对给map函数,kva接收中间键值对数组
 			kva := mapf(filename, string(content))
-			// 创建一个buffer来写入格式化后的JSON  
 			//中间键值对写入文件
 			//TODO 直接改map，map每遍历到一个word就输出到对应的文件
 			for i:=0;i<len(kva);i++{
+				// 创建一个buffer来写入格式化后的JSON
 				var buffer []byte
 				hashcode:=ihash(kva[i].Key)
 				target:=hashcode%nmidFiles
-				//创建文件，文件命名规范:mr_mid_第几个reduce任务(target)_该map任务的任务序号
-				oname := "mr_mid_"+strconv.Itoa(target)+"_"+strconv.Itoa(workNum)+".jsonl"
+				//创建文件，文件命名规范:worker的编号_mr_mid_第几个reduce任务(target)_该map任务的任务序号
+				oname := strconv.Itoa(workerNum)+"_mr_mid_"+strconv.Itoa(target)+"_"+strconv.Itoa(workNum)+".jsonl"
 				//打开文件，若没有就创建
 				file, err := os.OpenFile(oname, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
 				if err != nil {  
@@ -137,6 +140,8 @@ func Worker(mapf func(string, string) []KeyValue,
 			//fmt.Println("当前worker编号:",reply.Work.WorkerNum)
 			//fmt.Println("当前处理的文件名：",reply.Work.Filename)
 			filename:=reply.Work.Filename
+			//记录worker的编号
+			workerNum:=reply.Work.WorkerNum
 			//开始读入文件
 			jsonData, err := ioutil.ReadFile(filename+".json")  
 			if err != nil {  
@@ -169,7 +174,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			sort.Sort(kvs);
 			
 			//创建输出文件
-			outputName:="mr-out-"+strconv.Itoa(workNum)
+			outputName:=strconv.Itoa(workerNum)+"_mr-out-"+strconv.Itoa(workNum)
 			outputFile, _ := os.Create(outputName)
 			
 			//找出kvs切片中key相同的，并传给reduce记数
