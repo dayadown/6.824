@@ -70,7 +70,11 @@ func Worker(mapf func(string, string) []KeyValue,
 			time.Sleep(5*time.Second)
 			continue
 		}
-		if(reply.Work.Info=="finish!"){//任务完成，退出！
+		if reply.Work.Info=="finish!" {//任务完成，退出！
+			break;
+		}
+		if(reply.Work.Info==""){
+			fmt.Println("空消息！")
 			break;
 		}
 		//记录任务类型：map or reduce
