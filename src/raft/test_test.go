@@ -9,7 +9,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"testing"
 )
 import "time"
@@ -21,7 +20,7 @@ import "sync"
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
-func TestInitialElection2A(t *testing.T) {
+/*func TestInitialElection2A(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -50,9 +49,9 @@ func TestInitialElection2A(t *testing.T) {
 	cfg.checkOneLeader()
 
 	cfg.end()
-}
+}*/
 
-/*func TestReElection2A(t *testing.T) {
+func TestReElection2A(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -86,7 +85,7 @@ func TestInitialElection2A(t *testing.T) {
 	cfg.checkOneLeader()
 
 	cfg.end()
-}*/
+}
 
 func TestBasicAgree2B(t *testing.T) {
 	servers := 3

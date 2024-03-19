@@ -320,7 +320,7 @@ func (rf *Raft) Follower() {
 	stopTime := make(chan struct{}) //停止计时器
 	timeOut := make(chan struct{})  //计时器结束
 	//选举超时间隔，开启计时器
-	go rf.timepiece(300, 600, reTime, stopTime, timeOut)
+	go rf.timepiece(200, 400, reTime, stopTime, timeOut)
 	//等待计时器信号或心跳信号
 	for {
 		select {
