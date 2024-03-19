@@ -13,7 +13,7 @@ import "sync"
 
 type Persister struct {
 	mu        sync.Mutex
-	raftstate []byte
+	raftstate []byte //日志信息，存的是log的指针
 	snapshot  []byte
 }
 
