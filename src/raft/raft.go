@@ -176,6 +176,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = false
 			reply.Term = -1
 		}
+	} else { //任期比自己还小
+		//拒绝
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
 	}
 }
 
@@ -212,10 +216,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 // leader发送追加日志或心跳
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, replyChan chan *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, replyChan chan *AppendEntriesReply,
+	closeReplyChan chan struct{}, mutex *sync.Mutex) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	//要放回时查询一下返回通道是否已经关闭了,如果没关也不让关了，先放，才让关，防止关了再放报错
 	if ok {
-		replyChan <- reply
+		mutex.Lock()
+		select {
+		case <-closeReplyChan:
+			{
+				//收到channel已经关闭的通知
+				return ok
+			}
+		default:
+			{
+				replyChan <- reply
+			}
+		}
+		mutex.Unlock()
 	}
 	return ok
 }
@@ -249,11 +267,25 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the struct itself.
 //
 // 候选人发送投票请求
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, replyChan chan *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, replyChan chan *RequestVoteReply,
+	closeReplyChan chan struct{}, mutex *sync.Mutex) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	//println(rf.me, "向", server, "发送投票请求", ok)
-	if ok { //成功返回的回应才通知给服务器
-		replyChan <- reply
+	//要放时查询一下返回通道是否已经关闭了,如果没关也不让关了，先放，再让关，防止关了再放报错
+	if ok {
+		mutex.Lock()
+		select {
+		case <-closeReplyChan:
+			{
+				//收到channel已经关闭的通知
+				return ok
+			}
+		default:
+			{
+				replyChan <- reply
+			}
+		}
+		mutex.Unlock()
 	}
 	return ok
 }
@@ -354,7 +386,7 @@ func (rf *Raft) Candidate() {
 	lose := make(chan struct{})
 	timeOut := make(chan struct{})
 	//选举
-	go rf.sentVoteAndCollect(win, lose, timeOut)
+	go rf.sendVoteAndCollect(win, lose, timeOut)
 	for {
 		select {
 		case <-rf.heartBeat:
@@ -377,7 +409,7 @@ func (rf *Raft) Candidate() {
 				rf.mu.Lock()
 				rf.currentTerm++
 				rf.mu.Unlock()
-				go rf.sentVoteAndCollect(win, lose, timeOut)
+				go rf.sendVoteAndCollect(win, lose, timeOut)
 				break
 			}
 		case <-lose:
@@ -390,22 +422,21 @@ func (rf *Raft) Candidate() {
 	}
 }
 
-func (rf *Raft) sentVoteAndCollect(win chan struct{}, lose chan struct{}, timeOut chan struct{}) {
+func (rf *Raft) sendVoteAndCollect(win chan struct{}, lose chan struct{}, timeOut chan struct{}) {
 	//先给自己投票
 	votes := 1
 	//向其他每个raft服务器发送RequestVote，不能循环发送
-	var args []RequestVoteArgs
-	replyChan := make(chan *RequestVoteReply)
-	k := 0
+	args := RequestVoteArgs{
+		Term:        rf.currentTerm,
+		CandidateId: rf.me,
+	}
+	replyChan := make(chan *RequestVoteReply, rf.peerNum) //接收回复通道,通道容量为总节点数
+	closeReplyChan := make(chan struct{})                 //接受回复通道关闭标识（若不关闭，当竞选成功或失败时会有sendRequestVote协程一直阻塞，浪费资源）
+	mutex := sync.Mutex{}
 	for i := 0; i < rf.peerNum; i++ {
 		if i != rf.me {
-			args = append(args, RequestVoteArgs{
-				Term:        rf.currentTerm,
-				CandidateId: rf.me,
-			})
 			reply := RequestVoteReply{}
-			go rf.sendRequestVote(i, &args[k], &reply, replyChan)
-			k++
+			go rf.sendRequestVote(i, &args, &reply, replyChan, closeReplyChan, &mutex)
 		}
 	}
 	//发送完等待回复，也就相当于计时了
@@ -419,12 +450,27 @@ func (rf *Raft) sentVoteAndCollect(win chan struct{}, lose chan struct{}, timeOu
 				if reply.VoteGranted {
 					votes++
 					if votes >= rf.peerNum/2+1 {
+						//需要关闭replyChan
+						mutex.Lock()
+						close(closeReplyChan) //通知所有要回复的协程
+						close(replyChan)      //关闭回复通道
+						mutex.Unlock()
 						win <- struct{}{}
 						return
 					}
 				} else {
 					//println(rf.me, "失败的请求票,对方已经投了")
 					if reply.Term != -1 {
+						//有投票被拒绝了
+						rf.mu.Lock()
+						rf.currentTerm = reply.Term
+						rf.votedFor = -1
+						rf.mu.Unlock()
+						//需要关闭replyChan
+						mutex.Lock()
+						close(closeReplyChan) //通知所有要回复的协程
+						close(replyChan)      //关闭回复通道
+						mutex.Unlock()
 						lose <- struct{}{}
 						return
 					}
@@ -472,30 +518,38 @@ func (rf *Raft) Leader() {
 
 //发送心跳
 func (rf *Raft) sendHeart(stopHeart chan struct{}, leaderOut chan struct{}) {
-	replyChan := make(chan *AppendEntriesReply)
+	replyChan := make(chan *AppendEntriesReply, rf.peerNum)
+	closeReplyChan := make(chan struct{})
+	mutex := sync.Mutex{}
 	stopHandle := make(chan struct{})
 	//处理回应,看是否有拒绝心跳的
-	go rf.handleHeartReply(leaderOut, stopHandle, replyChan)
-	//循环发送
+	go rf.handleHeartReply(leaderOut, stopHandle, replyChan, closeReplyChan, &mutex)
 	for {
 		select {
 		case <-stopHeart:
 			{
+				//关闭处理回应的线程
 				stopHandle <- struct{}{}
+				//需要关闭replyChan
+				mutex.Lock()
+				close(closeReplyChan) //通知所有要回复的协程
+				close(replyChan)      //关闭回复通道
+				mutex.Unlock()
 				return
 			}
 		default:
 			{
-				//向每个raft服务器发送心跳
+				//构造心跳
+				args := AppendEntriesArgs{
+					Term:     rf.currentTerm,
+					LeaderId: rf.me,
+				}
+				//并发得向每个raft服务器发送心跳
 				for i := 0; i < rf.peerNum; i++ {
 					if i != rf.me {
-						//构造心跳和回应
-						args := AppendEntriesArgs{
-							Term:     rf.currentTerm,
-							LeaderId: rf.me,
-						}
+						//构造回应
 						reply := AppendEntriesReply{}
-						go rf.sendAppendEntries(i, &args, &reply, replyChan)
+						go rf.sendAppendEntries(i, &args, &reply, replyChan, closeReplyChan, &mutex)
 					}
 				}
 			}
@@ -506,7 +560,8 @@ func (rf *Raft) sendHeart(stopHeart chan struct{}, leaderOut chan struct{}) {
 	}
 }
 
-func (rf *Raft) handleHeartReply(leaderOut chan struct{}, stopHandle chan struct{}, replyChan chan *AppendEntriesReply) {
+func (rf *Raft) handleHeartReply(leaderOut chan struct{}, stopHandle chan struct{}, replyChan chan *AppendEntriesReply,
+	closeReplyChan chan struct{}, mutex *sync.Mutex) {
 	for {
 		select {
 		case <-stopHandle:
@@ -518,6 +573,11 @@ func (rf *Raft) handleHeartReply(leaderOut chan struct{}, stopHandle chan struct
 					rf.votedFor = -1
 					rf.currentTerm = reply.Term
 					rf.mu.Unlock()
+					//需要关闭replyChan
+					mutex.Lock()
+					close(closeReplyChan) //通知所有要回复的协程
+					close(replyChan)      //关闭回复通道
+					mutex.Unlock()
 					leaderOut <- struct{}{}
 					return
 				}
