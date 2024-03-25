@@ -276,7 +276,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		return false
 	}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	println(rf.me, "向", server, "发送投票请求", ok)
+	//println(rf.me, "向", server, "发送投票请求", ok)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if ok && rf.role == 1 {
