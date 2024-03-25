@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"math/rand"
 	"sync"
 )
@@ -67,6 +66,8 @@ type Raft struct {
 	currentTerm int           //服务器知道的最新任期号
 	votedFor    int           //在当前任期内收到选票的候选人id（即pees下标），也就是已经认谁为大哥了，且自己的任期也改为大哥的任期了
 
+	overTime time.Duration
+	timer    *time.Timer
 }
 
 // return currentTerm and whether this server
@@ -149,6 +150,9 @@ type RequestVoteReply struct {
 // 处理别的服务器发来的投票请求,每来一个请求就会开一个新的协程运行该函数，需要先来后到处理，所以加互斥锁
 // 一个任期内只能投一次票，当任期
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	if rf.killed() {
+		return
+	}
 	// Your code here (2A, 2B).
 
 	//2A
@@ -199,6 +203,9 @@ type AppendEntriesReply struct {
 
 //处理leader发来的心跳动，每来一个心跳就会开一个新的协程运行该函数，需要先来后到处理，所以加互斥锁
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if rf.killed() {
+		return
+	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term >= rf.currentTerm { //任期不小于自己
@@ -210,31 +217,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.heartBeat <- struct{}{} //通知主协程收到了心跳
 	} else { //任期比自己小，拒绝
+		println(rf.me, "拒绝来自", args.LeaderId, "的心跳")
 		reply.Term = rf.currentTerm
 		reply.Success = false
 	}
 }
 
 // leader发送追加日志或心跳
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, replyChan chan *AppendEntriesReply,
-	closeReplyChan chan struct{}, mutex *sync.Mutex) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	//要放回时查询一下返回通道是否已经关闭了,如果没关也不让关了，先放，才让关，防止关了再放报错
-	if ok {
-		mutex.Lock()
-		select {
-		case <-closeReplyChan:
-			{
-				//收到channel已经关闭的通知
-				return ok
-			}
-		default:
-			{
-				replyChan <- reply
-			}
-		}
-		mutex.Unlock()
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	if rf.killed() {
+		return false
 	}
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if ok && rf.role == 2 {
+		if !reply.Success {
+			rf.currentTerm = reply.Term
+			rf.role = 1
+		}
+	}
+
 	return ok
 }
 
@@ -267,25 +271,29 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the struct itself.
 //
 // 候选人发送投票请求
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, replyChan chan *RequestVoteReply,
-	closeReplyChan chan struct{}, mutex *sync.Mutex) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, voteNum *int) bool {
+	if rf.killed() {
+		return false
+	}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	//println(rf.me, "向", server, "发送投票请求", ok)
-	//要放时查询一下返回通道是否已经关闭了,如果没关也不让关了，先放，再让关，防止关了再放报错
-	if ok {
-		mutex.Lock()
-		select {
-		case <-closeReplyChan:
-			{
-				//收到channel已经关闭的通知
+	println(rf.me, "向", server, "发送投票请求", ok)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if ok && rf.role == 1 {
+		if reply.VoteGranted {
+			*voteNum++
+		} else {
+			//有拒绝票，直接转变为追随者
+			if !(reply.Term == -1) {
+				rf.currentTerm = reply.Term
+				rf.role = 0
 				return ok
 			}
-		default:
-			{
-				replyChan <- reply
-			}
 		}
-		mutex.Unlock()
+		if *voteNum >= rf.peerNum/2+1 {
+			//有过半的票数
+			rf.role = 2
+		}
 	}
 	return ok
 }
@@ -314,58 +322,30 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-//随机时间计时器,可被随时打断和重置,a(ms)-b(ms)
-func (rf *Raft) timepiece(a int, b int, reTime chan struct{}, stopTime chan struct{}, timeOut chan struct{}) {
-	rand.Seed(time.Now().UnixNano())
-	randTime := time.Duration(a+rand.Intn(b-a)) * time.Millisecond
-	t := time.NewTimer(randTime)
-	for {
-		select {
-		case <-reTime:
-			{
-				//重置计时
-				rand.Seed(time.Now().UnixNano())
-				randTime = time.Duration(a+rand.Intn(b-a)) * time.Millisecond
-				t.Reset(randTime)
-				break
-			}
-		case <-stopTime:
-			{
-				//停止计时
-				return
-			}
-		case <-t.C:
-			{
-				//计时结束
-				timeOut <- struct{}{}
-				return
-			}
-		}
-	}
-}
-
 //追随者状态
 func (rf *Raft) Follower() {
-	fmt.Printf("%d %d %d 成为追随者\n", rf.me, rf.currentTerm, rf.role)
+	if rf.killed() {
+		return
+	}
 	rf.role = 0
-	reTime := make(chan struct{})   //重置计时器
-	stopTime := make(chan struct{}) //停止计时器
-	timeOut := make(chan struct{})  //计时器结束
-	//选举超时间隔，开启计时器
-	go rf.timepiece(200, 400, reTime, stopTime, timeOut)
+
+	rf.overTime = time.Duration(200+rand.Intn(150)) * time.Millisecond //选举超时时间
+	rf.timer = time.NewTimer(rf.overTime)
 	//等待计时器信号或心跳信号
 	for {
 		select {
-		case <-timeOut:
+		case <-rf.timer.C:
 			{
 				//计时器结束，成为候选者
+				println(rf.me, "计时器结束，成为候选者")
 				rf.Candidate()
 				return
 			}
 		case <-rf.heartBeat:
 			{
 				//心跳信号，重置计时器
-				reTime <- struct{}{}
+				rf.overTime = time.Duration(200+rand.Intn(150)) * time.Millisecond
+				rf.timer.Reset(rf.overTime)
 			}
 		}
 	}
@@ -373,114 +353,54 @@ func (rf *Raft) Follower() {
 
 //候选人状态
 func (rf *Raft) Candidate() {
-	fmt.Printf("%d %d %d 成为候选者\n", rf.me, rf.currentTerm, rf.role)
+	if rf.killed() {
+		return
+	}
 	rf.role = 1
-
 	//任期加1，准备要票
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	rf.mu.Unlock()
-
-	win := make(chan struct{})
-	lose := make(chan struct{})
-	timeOut := make(chan struct{})
-	//选举
-	go rf.sendVoteAndCollect(win, lose, timeOut)
-	for {
-		select {
-		case <-rf.heartBeat:
-			{
-				//接受心跳,转追随者
-				rf.Follower()
-				return
-			}
-		case <-win:
-			{
-				//当选领导人
-				rf.Leader()
-				return
-			}
-		case <-timeOut:
-			{
-				println(rf.me, "等待选票超时")
-				//等待选票超时了，重新发送并重新计时
-				//任期加1
-				rf.mu.Lock()
-				rf.currentTerm++
-				rf.mu.Unlock()
-				go rf.sendVoteAndCollect(win, lose, timeOut)
-				break
-			}
-		case <-lose:
-			{
-				//选举失败
-				rf.Follower()
-				return
-			}
-		}
-	}
-}
-
-func (rf *Raft) sendVoteAndCollect(win chan struct{}, lose chan struct{}, timeOut chan struct{}) {
-	//先给自己投票
-	votes := 1
-	//向其他每个raft服务器发送RequestVote，不能循环发送
 	args := RequestVoteArgs{
 		Term:        rf.currentTerm,
 		CandidateId: rf.me,
 	}
-	replyChan := make(chan *RequestVoteReply, rf.peerNum) //接收回复通道,通道容量为总节点数
-	closeReplyChan := make(chan struct{})                 //接受回复通道关闭标识（若不关闭，当竞选成功或失败时会有sendRequestVote协程一直阻塞，浪费资源）
-	mutex := sync.Mutex{}
+	//给自己投票
+	voteNum := 1
+	rf.mu.Unlock()
+	//计时
+	rf.overTime = time.Duration(150+rand.Intn(150)) * time.Millisecond
+	rf.timer = time.NewTimer(rf.overTime)
+	//并发发送请求
 	for i := 0; i < rf.peerNum; i++ {
 		if i != rf.me {
 			reply := RequestVoteReply{}
-			go rf.sendRequestVote(i, &args, &reply, replyChan, closeReplyChan, &mutex)
+			go rf.sendRequestVote(i, &args, &reply, &voteNum)
 		}
 	}
-	//发送完等待回复，也就相当于计时了
-	timer := time.NewTimer(time.Duration(rand.Intn(100)+200) * time.Millisecond)
-	//不断接收通道的回复信息，如果票数够了，就直接竞选成功
 	for {
 		select {
-		case reply := <-replyChan:
+		case <-rf.timer.C:
 			{
-				//println(rf.me, "收到回应", reply.VoteGranted, reply.Term)
-				if reply.VoteGranted {
-					votes++
-					if votes >= rf.peerNum/2+1 {
-						//需要关闭replyChan
-						mutex.Lock()
-						close(closeReplyChan) //通知所有要回复的协程
-						close(replyChan)      //关闭回复通道
-						mutex.Unlock()
-						win <- struct{}{}
-						return
-					}
-				} else {
-					//println(rf.me, "失败的请求票,对方已经投了")
-					if reply.Term != -1 {
-						//有投票被拒绝了
-						rf.mu.Lock()
-						rf.currentTerm = reply.Term
-						rf.votedFor = -1
-						rf.mu.Unlock()
-						//需要关闭replyChan
-						mutex.Lock()
-						close(closeReplyChan) //通知所有要回复的协程
-						close(replyChan)      //关闭回复通道
-						mutex.Unlock()
-						lose <- struct{}{}
-						return
-					}
-				}
-			}
-		case <-timer.C:
-			{
-				//时间到了也无事发生，则重试
-				timeOut <- struct{}{}
+				println(rf.me, "等待要票超时")
+				rf.Candidate()
 				return
+			}
+		case <-rf.heartBeat:
+			{
+				println(rf.me, "有比自己大的候选者，自己转为追随者")
+				rf.Follower()
+				rf.votedFor = -1
+				return
+			}
+		default:
+			{
+				if rf.role == 2 {
+					println(rf.me, "成功当选")
+					rf.Leader()
+					return
+				}
+
 			}
 		}
 	}
@@ -488,97 +408,42 @@ func (rf *Raft) sendVoteAndCollect(win chan struct{}, lose chan struct{}, timeOu
 
 //领导人状态
 func (rf *Raft) Leader() {
-	fmt.Printf("%d %d %d 成为领导者\n", rf.me, rf.currentTerm, rf.role)
+	if rf.killed() {
+		println(rf.me, "已死")
+		return
+	}
 	rf.role = 2
 
-	stopHeart := make(chan struct{})
-	leaderOut := make(chan struct{})
+	for i := 0; i < rf.peerNum; i++ {
+		if i != rf.me {
+			args := AppendEntriesArgs{
+				Term:     rf.currentTerm,
+				LeaderId: rf.me,
+			}
+			reply := AppendEntriesReply{}
+			go rf.sendAppendEntries(i, &args, &reply)
+		}
+	}
 
-	//不断发送心跳,隔100ms一次
-	go rf.sendHeart(stopHeart, leaderOut)
+	rf.overTime = time.Duration(100) * time.Millisecond
+	rf.timer = time.NewTimer(rf.overTime)
 
 	for {
 		select {
 		case <-rf.heartBeat: //接受心跳了，转追随者
 			{
-				//停止发送心跳
-				stopHeart <- struct{}{}
 				rf.Follower()
 				return
 			}
-		case <-leaderOut: //过期了
+		case <-rf.timer.C:
 			{
-				stopHeart <- struct{}{}
-				rf.Follower()
-				return
-			}
-		}
-	}
-}
-
-//发送心跳
-func (rf *Raft) sendHeart(stopHeart chan struct{}, leaderOut chan struct{}) {
-	replyChan := make(chan *AppendEntriesReply, rf.peerNum)
-	closeReplyChan := make(chan struct{})
-	mutex := sync.Mutex{}
-	stopHandle := make(chan struct{})
-	//处理回应,看是否有拒绝心跳的
-	go rf.handleHeartReply(leaderOut, stopHandle, replyChan, closeReplyChan, &mutex)
-	for {
-		select {
-		case <-stopHeart:
-			{
-				//关闭处理回应的线程
-				stopHandle <- struct{}{}
-				//需要关闭replyChan
-				mutex.Lock()
-				close(closeReplyChan) //通知所有要回复的协程
-				close(replyChan)      //关闭回复通道
-				mutex.Unlock()
+				rf.Leader()
 				return
 			}
 		default:
 			{
-				//构造心跳
-				args := AppendEntriesArgs{
-					Term:     rf.currentTerm,
-					LeaderId: rf.me,
-				}
-				//并发得向每个raft服务器发送心跳
-				for i := 0; i < rf.peerNum; i++ {
-					if i != rf.me {
-						//构造回应
-						reply := AppendEntriesReply{}
-						go rf.sendAppendEntries(i, &args, &reply, replyChan, closeReplyChan, &mutex)
-					}
-				}
-			}
-		}
-		//开始计时
-		//计时
-		time.Sleep(time.Duration(100) * time.Millisecond)
-	}
-}
-
-func (rf *Raft) handleHeartReply(leaderOut chan struct{}, stopHandle chan struct{}, replyChan chan *AppendEntriesReply,
-	closeReplyChan chan struct{}, mutex *sync.Mutex) {
-	for {
-		select {
-		case <-stopHandle:
-			return
-		case reply := <-replyChan:
-			{
-				if !reply.Success {
-					rf.mu.Lock()
-					rf.votedFor = -1
-					rf.currentTerm = reply.Term
-					rf.mu.Unlock()
-					//需要关闭replyChan
-					mutex.Lock()
-					close(closeReplyChan) //通知所有要回复的协程
-					close(replyChan)      //关闭回复通道
-					mutex.Unlock()
-					leaderOut <- struct{}{}
+				if rf.role == 1 {
+					rf.Follower()
 					return
 				}
 			}
@@ -599,6 +464,9 @@ func (rf *Raft) handleHeartReply(leaderOut chan struct{}, stopHandle chan struct
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.mu.Lock()
+	rf.timer.Stop()
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) killed() bool {
@@ -634,7 +502,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peerNum = len(peers)            //peer总数量
 	rf.heartBeat = make(chan struct{}) //心跳信号，收到该信号则表示接受了心跳（也就是有领导人在）
 	rf.votedFor = -1                   //设置投票默认值，-1代表未给任何人投票
-	go rf.Follower()                   //另起协程初始按追随者状态运行
+
+	rf.overTime = time.Duration(500) * time.Millisecond
+	rf.timer = time.NewTimer(rf.overTime)
+	go rf.Follower() //另起协程初始按追随者状态运行
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
