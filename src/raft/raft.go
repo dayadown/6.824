@@ -39,10 +39,18 @@ import "time"
 // snapshots) on the applyCh; at that point you can add fields to
 // ApplyMsg, but set CommandValid to false for these other uses.
 //
+
+//当绝大部分raft服务器安全的复制了某一条命令日志，leader会通过往channel中传入ApplyMsg
+//告知kv，曾经我答应你存在某一下标的某一指令成功或者失败地存入raft日志中了
+
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+}
+type Log struct {
+	Term    int
+	Command interface{}
 }
 
 //
@@ -68,6 +76,14 @@ type Raft struct {
 
 	overTime time.Duration
 	timer    *time.Timer
+
+	//2B
+	applyCh     chan ApplyMsg
+	log         []Log //日志信息
+	commitIndex int   //已知的提交的日志索引
+	lastApplied int   //最大的应用于服务器的索引
+	nextIndex   []int //leader为每个服务器维护的下一日志存放索引
+	matchIndex  []int
 }
 
 // return currentTerm and whether this server
@@ -132,6 +148,9 @@ type RequestVoteArgs struct {
 	Term        int //候选人的任期号
 	CandidateId int //请求投票的候选人id
 
+	//2B
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -159,32 +178,49 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	println(args.CandidateId, "向", rf.me, "请求", args.Term, rf.currentTerm)
-	//如果任期比自己大，给他投票
+
+	//任期比自己小，拒绝
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+		reply.Term = rf.me
+		return
+	}
+
+	//候选者任期比自己大，更新任期,该任期下肯定没有投票，所以更新voteFor=-1
+	//是否投票给候选者还需要进一步的日志判断
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
+		rf.votedFor = -1
+	}
+
+	//候选者任期和自己相同，那就看自己本来有没有投票和日志的信息了，所以不用处理
+
+	var meLastLogIndex int
+	var meLastLogTerm int
+	if len(rf.log) == 0 {
+		meLastLogIndex = -1
+		meLastLogTerm = 0
+	} else {
+		meLastLogIndex = len(rf.log) - 1
+		meLastLogTerm = rf.log[meLastLogIndex].Term
+	}
+
+	//满足条件，投票给他
+	//1.当前任期未投票  or  投的就是候选者
+	//2.候选者最后一条日志的任期大于自己的  or  等于但是候选者日志更长
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
+		(meLastLogTerm < args.LastLogTerm ||
+			(meLastLogTerm == args.LastLogTerm && args.LastLogIndex >= meLastLogIndex)) {
+		rf.votedFor = args.CandidateId
+		rf.currentTerm = args.Term
+		rf.heartBeat <- struct{}{}
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
-		rf.votedFor = args.Term
-		//如果是领导者，则要停止发送心跳并转换为追随者
-		//如果是候选者，则要停止候选，转为追随者
-		//如果是追随者则停止选举超时倒计时
-		//综上，其实就是一次心跳
-		rf.heartBeat <- struct{}{}
-	} else if args.Term == rf.currentTerm { //任期和自己相同
-		if rf.votedFor == -1 { //自己该任期还没投过票
-			//拒绝
-			reply.VoteGranted = false
-			reply.Term = rf.currentTerm
-		} else {
-			//投过票了，没票了
-			reply.VoteGranted = false
-			reply.Term = -1
-		}
-	} else { //任期比自己还小
-		//拒绝
-		reply.VoteGranted = false
-		reply.Term = rf.currentTerm
+		return
 	}
+
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
 }
 
 //leader追加日志或心跳的请求参数
@@ -193,6 +229,11 @@ type AppendEntriesArgs struct {
 	Term     int //领导人任期
 	LeaderId int //领导人的Id
 
+	//2B
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []Log
+	LeaderCommit int
 }
 
 //对心跳的回复(有日志的话，心跳就附加了传递日志的功能)
@@ -280,15 +321,15 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if ok && rf.role == 1 {
+		if reply.Term > rf.currentTerm {
+			//回应的任期有比自己大的
+			rf.currentTerm = reply.Term
+			rf.role = 0
+			rf.votedFor = -1
+			return ok
+		}
 		if reply.VoteGranted {
 			*voteNum++
-		} else {
-			//有拒绝票，直接转变为追随者
-			if !(reply.Term == -1) {
-				rf.currentTerm = reply.Term
-				rf.role = 0
-				return ok
-			}
 		}
 		if *voteNum >= rf.peerNum/2+1 {
 			//有过半的票数
@@ -312,12 +353,34 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // term. the third return value is true if this server believes it is
 // the leader.
 //
+
+//Start，kv层操控raft层的接口，传递一个command,命令raft将其存入日志
+//返回参数
+//1.index表示raft领导告诉kv层条命令未来会被存在日志的哪个索引处
+//2.term表示raft中这条日志创建时的任期
+//3.当前start的是否为leader(不是leader，KV层会start下一个raft服务器，直到是leader)
+
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := rf.role == 2
 
 	// Your code here (2B).
+	if rf.killed() {
+		return index, term, false
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	isLeader := rf.role == 2
+	if !isLeader {
+		return index, term, isLeader
+	} else {
+		rf.log = append(rf.log, Log{
+			Term:    rf.currentTerm,
+			Command: command,
+		})
+		index = len(rf.log)
+	}
 
 	return index, term, isLeader
 }
@@ -362,12 +425,17 @@ func (rf *Raft) Candidate() {
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	args := RequestVoteArgs{
-		Term:        rf.currentTerm,
-		CandidateId: rf.me,
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: len(rf.log) - 1,
+		LastLogTerm:  0,
 	}
+	if len(rf.log) > 0 {
+		args.LastLogTerm = rf.log[len(rf.log)-1].Term
+	}
+	rf.mu.Unlock()
 	//给自己投票
 	voteNum := 1
-	rf.mu.Unlock()
 	//计时
 	rf.overTime = time.Duration(150+rand.Intn(150)) * time.Millisecond
 	rf.timer = time.NewTimer(rf.overTime)
@@ -505,6 +573,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.overTime = time.Duration(500) * time.Millisecond
 	rf.timer = time.NewTimer(rf.overTime)
+
+	//2B
+	rf.applyCh = applyCh
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.log = make([]Log, 0)
+	rf.nextIndex = make([]int, rf.peerNum)
+	rf.matchIndex = make([]int, rf.peerNum)
+
 	go rf.Follower() //另起协程初始按追随者状态运行
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
