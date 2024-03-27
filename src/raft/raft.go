@@ -158,6 +158,7 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 // 投票请求的回复
 //
+
 type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int  //回复的任期，用于候选者更新自身
@@ -168,6 +169,7 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 // 处理别的服务器发来的投票请求,每来一个请求就会开一个新的协程运行该函数，需要先来后到处理，所以加互斥锁
 // 一个任期内只能投一次票，当任期
+
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.killed() {
 		return
@@ -213,7 +215,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			(meLastLogTerm == args.LastLogTerm && args.LastLogIndex >= meLastLogIndex)) {
 		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term
+		println(args.CandidateId, "向", rf.me, "请求", "同意了")
 		rf.heartBeat <- struct{}{}
+		println(args.CandidateId, "向", rf.me, "请求", "同意了且向自己通知了心跳")
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
 		return
@@ -224,6 +228,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 //leader追加日志或心跳的请求参数
+
 type AppendEntriesArgs struct {
 	//2A
 	Term     int //领导人任期
@@ -237,12 +242,15 @@ type AppendEntriesArgs struct {
 }
 
 //对心跳的回复(有日志的话，心跳就附加了传递日志的功能)
+
 type AppendEntriesReply struct {
-	Term    int  //当前的任期号，用于领导人更新自己的任期号
-	Success bool //是否接受
+	Term       int  //当前的任期号，用于领导人更新自己的任期号
+	Success    bool //是否接受
+	MatchIndex int  //回复的匹配下标
 }
 
 //处理leader发来的心跳动，每来一个心跳就会开一个新的协程运行该函数，需要先来后到处理，所以加互斥锁
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	if rf.killed() {
 		return
@@ -250,11 +258,40 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term >= rf.currentTerm { //任期不小于自己
-		println(rf.me, "接受来自", args.LeaderId, "的心跳")
+		println(rf.me, "接收到来自", args.LeaderId, "的心跳")
 		rf.currentTerm = args.Term      //更改自己的任期
-		reply.Success = true            //接受该心跳
 		if args.Term > rf.currentTerm { //严格大于
 			rf.votedFor = -1 //重置投票信息
+		}
+		reply.Term = rf.currentTerm
+		if args.Entries == nil {
+			//日志为空，是心跳信息，直接同意
+			reply.Success = true
+		} else {
+			//日志不为空，需要进一步判断
+			if args.PrevLogIndex >= len(rf.log) {
+				//日志缺失，返回false
+				reply.Success = false
+				reply.MatchIndex = -1
+			} else {
+				if args.PrevLogIndex == -1 {
+					//已经到头了，不用查了，直接将args的日志复制过来即可,更新matchIndex到当前日志长度-1
+					//表示到matchIndex这里均已经与leader同步了
+					rf.log = args.Entries
+					reply.Success = true
+					reply.MatchIndex = len(rf.log) - 1
+				} else {
+					if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+						//前一日志的任期不匹配
+						reply.Success = false
+					} else {
+						//前一日志匹配了，追加日志即可
+						reply.Success = true
+						rf.log = append(rf.log[:args.PrevLogIndex], args.Entries...)
+						reply.MatchIndex = len(rf.log) - 1
+					}
+				}
+			}
 		}
 		rf.heartBeat <- struct{}{} //通知主协程收到了心跳
 	} else { //任期比自己小，拒绝
@@ -274,9 +311,20 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if ok && rf.role == 2 {
-		if !reply.Success {
+		if reply.Term > rf.currentTerm {
+			//回复任期比自己大
 			rf.currentTerm = reply.Term
-			rf.role = 1
+			rf.role = 0
+		} else {
+			if reply.Success {
+				//不是心跳的成功回复,则更新matchIndex
+				if !(reply.MatchIndex == -1) {
+					rf.matchIndex[server] = reply.MatchIndex
+				}
+			} else {
+				//日志有冲突，该服务器的nextIndex递减，下一次心跳向前找第一个不冲突的日志
+				rf.nextIndex[server]--
+			}
 		}
 	}
 
@@ -415,6 +463,7 @@ func (rf *Raft) Follower() {
 }
 
 //候选人状态
+
 func (rf *Raft) Candidate() {
 	if rf.killed() {
 		return
@@ -457,8 +506,8 @@ func (rf *Raft) Candidate() {
 		case <-rf.heartBeat:
 			{
 				println(rf.me, "有比自己大的候选者，自己转为追随者")
-				rf.Follower()
 				rf.votedFor = -1
+				rf.Follower()
 				return
 			}
 		default:
@@ -482,16 +531,26 @@ func (rf *Raft) Leader() {
 	}
 	rf.role = 2
 
+	rf.mu.Lock()
+	//重置nextIndex和matchIndex
+	for i := 0; i < rf.peerNum; i++ {
+		rf.nextIndex[i] = len(rf.log)
+		rf.matchIndex[i] = 0
+	}
+
+	//先发送一次心跳，因为刚刚才初始化nextIndex,且上了锁，所以第一次心跳不可能有新日志，直接发心跳即可
 	for i := 0; i < rf.peerNum; i++ {
 		if i != rf.me {
 			args := AppendEntriesArgs{
-				Term:     rf.currentTerm,
-				LeaderId: rf.me,
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				LeaderCommit: rf.commitIndex,
 			}
 			reply := AppendEntriesReply{}
 			go rf.sendAppendEntries(i, &args, &reply)
 		}
 	}
+	rf.mu.Unlock()
 
 	rf.overTime = time.Duration(100) * time.Millisecond
 	rf.timer = time.NewTimer(rf.overTime)
@@ -505,8 +564,56 @@ func (rf *Raft) Leader() {
 			}
 		case <-rf.timer.C:
 			{
-				rf.Leader()
-				return
+				rf.mu.Lock()
+				//检查是否有可提交的日志
+				for i := rf.commitIndex + 1; i < len(rf.log); i++ {
+					//统计该下标下的日志复制情况
+					success := 1
+					for j := 0; j < rf.peerNum; j++ {
+						if rf.matchIndex[i] >= i {
+							success++
+						}
+					}
+					//超过半数，提交，并更改commitIndex
+					if success >= rf.peerNum/2+1 {
+						rf.applyCh <- ApplyMsg{
+							CommandValid: true,
+							Command:      rf.log[i].Command,
+							CommandIndex: i,
+						}
+						rf.commitIndex = 1
+					}
+				}
+
+				//到了心跳的间隔，发送心跳
+				//1.若日志的最大索引>=nextIndex[i],则需要向该服务器发送日志信息，否则发送心跳即可
+				for i := 0; i < rf.peerNum; i++ {
+					if i != rf.me {
+						args := AppendEntriesArgs{
+							Term:         rf.currentTerm,
+							LeaderId:     rf.me,
+							LeaderCommit: rf.commitIndex,
+						}
+						if len(rf.log)-1 >= rf.nextIndex[i] {
+							args.PrevLogIndex = rf.nextIndex[i] - 1
+							if args.PrevLogIndex == -1 {
+								args.PrevLogTerm = 0
+								args.Entries = rf.log
+							} else {
+								args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+								args.Entries = rf.log[rf.nextIndex[i]:]
+							}
+						}
+						reply := AppendEntriesReply{}
+						go rf.sendAppendEntries(i, &args, &reply)
+					}
+				}
+				rf.mu.Unlock()
+				//重新计时
+				rf.overTime = time.Duration(100) * time.Millisecond
+				rf.timer = time.NewTimer(rf.overTime)
+
+				break
 			}
 		default:
 			{
