@@ -673,10 +673,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 
 	//2A
-	rf.currentTerm = 0                 //初始化任期为0
-	rf.peerNum = len(peers)            //peer总数量
-	rf.heartBeat = make(chan struct{}) //心跳信号，收到该信号则表示接受了心跳（也就是有领导人在）
-	rf.votedFor = -1                   //设置投票默认值，-1代表未给任何人投票
+	rf.currentTerm = 0                             //初始化任期为0
+	rf.peerNum = len(peers)                        //peer总数量
+	rf.heartBeat = make(chan struct{}, rf.peerNum) //心跳信号，收到该信号则表示接受了心跳（也就是有领导人在）
+	rf.votedFor = -1                               //设置投票默认值，-1代表未给任何人投票
 
 	rf.overTime = time.Duration(500) * time.Millisecond
 	rf.timer = time.NewTimer(rf.overTime)
