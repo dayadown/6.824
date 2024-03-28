@@ -42,6 +42,7 @@ import "time"
 
 //当绝大部分raft服务器安全的复制了某一条命令日志，leader会通过往channel中传入ApplyMsg
 //告知kv，曾经我答应你存在某一下标的某一指令成功或者失败地存入raft日志中了
+//非leader节点在得知leader已经commit了某些自己已有的日志时，也会发送ApplyMsg到自己的kv层
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -259,7 +260,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term >= rf.currentTerm { //任期不小于自己,根据日志信息返回消息
-		println(rf.me, "接收到来自", args.LeaderId, "的心跳")
+		println(rf.me, "接收到来自", args.LeaderId, "的心跳", "rf.commitIndex", rf.commitIndex, "args.LeaderCommit", args.LeaderCommit)
 		rf.currentTerm = args.Term      //更改自己的任期
 		if args.Term > rf.currentTerm { //严格大于
 			rf.votedFor = -1 //重置投票信息
@@ -279,10 +280,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				//表示到matchIndex这里均已经与leader同步了
 				reply.Success = true
 				if !(args.Entries == nil) {
+					println(rf.me, "日志不为空")
 					rf.log = args.Entries
 					reply.MatchIndex = len(rf.log) - 1
 				} else {
 					//日志为空，是心跳
+					println(rf.me, "日志为空，是心跳")
 					reply.MatchIndex = -1
 				}
 			} else {
@@ -298,6 +301,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 						reply.MatchIndex = len(rf.log) - 1
 					} else {
 						//日志为空，是心跳
+						println(rf.me, "日志为空，是心跳")
 						reply.MatchIndex = -1
 					}
 				}
@@ -308,6 +312,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		println(rf.me, "拒绝来自", args.LeaderId, "的心跳")
 		reply.Term = rf.currentTerm
 		reply.Success = false
+	}
+
+	//检查是否有可提交的日志
+	if reply.Success {
+		for i := rf.lastApplied + 1; i <= args.LeaderCommit; i++ {
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[i].Command,
+				CommandIndex: i,
+			}
+			rf.lastApplied = i
+			rf.commitIndex = i
+		}
 	}
 }
 
@@ -327,13 +344,13 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			rf.role = 0
 		} else {
 			if reply.Success {
-				//不是心跳的成功回复,则更新matchIndex
+				//不是心跳的成功回复,则更新matchIndex，和nextIndex
 				if !(reply.MatchIndex == -1) {
+					rf.nextIndex[server] = reply.MatchIndex + 1
 					rf.matchIndex[server] = reply.MatchIndex
 				}
 			} else {
 				//日志有冲突，该服务器的nextIndex递减，下一次心跳向前找第一个不冲突的日志
-				println("--了")
 				rf.nextIndex[server]--
 			}
 		}
@@ -434,11 +451,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if !isLeader {
 		return index, term, isLeader
 	} else {
+		println("给", rf.me, "发指令")
 		rf.log = append(rf.log, Log{
 			Term:    rf.currentTerm,
 			Command: command,
 		})
-		index = len(rf.log)
+		index = len(rf.log) - 1
 	}
 
 	return index, term, isLeader
@@ -586,28 +604,34 @@ func (rf *Raft) Leader() {
 				rf.mu.Lock()
 				//检查是否有可提交的日志
 				for i := rf.commitIndex + 1; i < len(rf.log); i++ {
-					//统计该下标下的日志复制情况
-					success := 1
-					for j := 0; j < rf.peerNum; j++ {
-						if rf.matchIndex[i] >= i {
-							success++
+					if rf.log[i].Term == rf.currentTerm {
+						//统计该下标下的日志复制情况
+						success := 1
+						for j := 0; j < rf.peerNum; j++ {
+							if rf.matchIndex[i] >= i {
+								success++
+							}
 						}
-					}
-					//超过半数，提交给本地机执行，并更改commitIndex
-					if success >= rf.peerNum/2+1 {
-						rf.applyCh <- ApplyMsg{
-							CommandValid: true,
-							Command:      rf.log[i].Command,
-							CommandIndex: i,
+						//超过半数，更改commitIndex
+						if success >= rf.peerNum/2+1 {
+							rf.commitIndex = i
 						}
-						rf.commitIndex = i
 					}
 				}
-
+				//检查是否有可应用的日志
+				for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+					rf.applyCh <- ApplyMsg{
+						CommandValid: true,
+						Command:      rf.log[i].Command,
+						CommandIndex: i,
+					}
+					rf.lastApplied = i
+				}
 				//到了心跳的间隔，发送心跳
 				//1.若日志的最大索引>=nextIndex[i],则需要向该服务器发送日志信息，否则发送心跳即可
 				for i := 0; i < rf.peerNum; i++ {
 					if i != rf.me {
+						//println(rf.me, "给", i, "发心跳信息", len(rf.log), rf.nextIndex[i])
 						args := AppendEntriesArgs{
 							Term:         rf.currentTerm,
 							LeaderId:     rf.me,
@@ -709,8 +733,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	//2B
 	rf.applyCh = applyCh
-	rf.commitIndex = 0
-	rf.lastApplied = 0
+	rf.commitIndex = -1
+	rf.lastApplied = -1
 	rf.log = make([]Log, 0)
 	rf.nextIndex = make([]int, rf.peerNum)
 	rf.matchIndex = make([]int, rf.peerNum)

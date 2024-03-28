@@ -445,6 +445,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
+					println("成功提交命令到", index)
 					break
 				}
 			}
