@@ -115,7 +115,7 @@ func TestBasicAgree2B(t *testing.T) {
 // check, based on counting bytes of RPCs, that
 // each command is sent to each peer just once.
 //
-/*func TestRPCBytes2B(t *testing.T) {
+func TestRPCBytes2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -245,14 +245,12 @@ loop:
 			// give solution some time to settle
 			time.Sleep(3 * time.Second)
 		}
-
 		leader := cfg.checkOneLeader()
 		_, term, ok := cfg.rafts[leader].Start(1)
 		if !ok {
 			// leader moved on really quickly
 			continue
 		}
-
 		iters := 5
 		var wg sync.WaitGroup
 		is := make(chan int, iters)
@@ -270,7 +268,6 @@ loop:
 				is <- i
 			}(ii)
 		}
-
 		wg.Wait()
 		close(is)
 
@@ -280,7 +277,6 @@ loop:
 				continue loop
 			}
 		}
-
 		failed := false
 		cmds := []int{}
 		for index := range is {
@@ -307,7 +303,6 @@ loop:
 			}()
 			continue
 		}
-
 		for ii := 0; ii < iters; ii++ {
 			x := 100 + ii
 			ok := false
@@ -320,7 +315,6 @@ loop:
 				t.Fatalf("cmd %v missing in %v", x, cmds)
 			}
 		}
-
 		success = true
 		break
 	}
@@ -550,7 +544,7 @@ loop:
 	}
 
 	cfg.end()
-}*/
+}
 
 func TestPersist12C(t *testing.T) {
 	servers := 3
