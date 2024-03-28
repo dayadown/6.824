@@ -48,6 +48,7 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 }
+
 type Log struct {
 	Term    int
 	Command interface{}
@@ -215,9 +216,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			(meLastLogTerm == args.LastLogTerm && args.LastLogIndex >= meLastLogIndex)) {
 		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term
-		println(args.CandidateId, "向", rf.me, "请求", "同意了")
+		//println(args.CandidateId, "向", rf.me, "请求", "同意了")
 		rf.heartBeat <- struct{}{}
-		println(args.CandidateId, "向", rf.me, "请求", "同意了且向自己通知了心跳")
+		//println(args.CandidateId, "向", rf.me, "请求", "同意了且向自己通知了心跳")
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
 		return
@@ -257,38 +258,47 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.Term >= rf.currentTerm { //任期不小于自己
+	if args.Term >= rf.currentTerm { //任期不小于自己,根据日志信息返回消息
 		println(rf.me, "接收到来自", args.LeaderId, "的心跳")
 		rf.currentTerm = args.Term      //更改自己的任期
 		if args.Term > rf.currentTerm { //严格大于
 			rf.votedFor = -1 //重置投票信息
 		}
 		reply.Term = rf.currentTerm
-		if args.Entries == nil {
-			//日志为空，是心跳信息，直接同意
-			reply.Success = true
+
+		//心跳中日志信息为空也要检查preLogIndex和preLogTerm，
+		//在成功返回的时候(即和leader的日志匹配的时候)才根据args的commitIndex来提交日志，并且更新commitIndex
+
+		if args.PrevLogIndex >= len(rf.log) {
+			//日志空缺，返回false
+			println("日志空缺，返回false", args.PrevLogIndex, len(rf.log))
+			reply.Success = false
 		} else {
-			//日志不为空，需要进一步判断
-			if args.PrevLogIndex >= len(rf.log) {
-				//日志缺失，返回false
-				reply.Success = false
-				reply.MatchIndex = -1
-			} else {
-				if args.PrevLogIndex == -1 {
-					//已经到头了，不用查了，直接将args的日志复制过来即可,更新matchIndex到当前日志长度-1
-					//表示到matchIndex这里均已经与leader同步了
+			if args.PrevLogIndex == -1 {
+				//已经到头了，不用查了，直接将args的日志复制过来即可,更新matchIndex到当前日志长度-1
+				//表示到matchIndex这里均已经与leader同步了
+				reply.Success = true
+				if !(args.Entries == nil) {
 					rf.log = args.Entries
-					reply.Success = true
 					reply.MatchIndex = len(rf.log) - 1
 				} else {
-					if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-						//前一日志的任期不匹配
-						reply.Success = false
-					} else {
-						//前一日志匹配了，追加日志即可
-						reply.Success = true
+					//日志为空，是心跳
+					reply.MatchIndex = -1
+				}
+			} else {
+				if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+					//前一日志的任期不匹配
+					println("前一日志的任期不匹配")
+					reply.Success = false
+				} else {
+					//前一日志匹配了，追加日志即可
+					reply.Success = true
+					if !(args.Entries == nil) {
 						rf.log = append(rf.log[:args.PrevLogIndex], args.Entries...)
 						reply.MatchIndex = len(rf.log) - 1
+					} else {
+						//日志为空，是心跳
+						reply.MatchIndex = -1
 					}
 				}
 			}
@@ -323,6 +333,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				}
 			} else {
 				//日志有冲突，该服务器的nextIndex递减，下一次心跳向前找第一个不冲突的日志
+				println("--了")
 				rf.nextIndex[server]--
 			}
 		}
@@ -349,7 +360,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // can't be reached, a lost request, or a lost reply.
 //
 // Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
+// handler function on the server side does not return. Thus, there
 // is no need to implement your own timeouts around Call().
 //
 // look at the comments in ../labrpc/labrpc.go for more details.
@@ -434,6 +445,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 //追随者状态
+
 func (rf *Raft) Follower() {
 	if rf.killed() {
 		return
@@ -524,6 +536,7 @@ func (rf *Raft) Candidate() {
 }
 
 //领导人状态
+
 func (rf *Raft) Leader() {
 	if rf.killed() {
 		println(rf.me, "已死")
@@ -545,6 +558,12 @@ func (rf *Raft) Leader() {
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
 				LeaderCommit: rf.commitIndex,
+			}
+			args.PrevLogIndex = len(rf.log) - 1
+			if args.PrevLogIndex == -1 {
+				args.PrevLogTerm = 0
+			} else {
+				args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 			}
 			reply := AppendEntriesReply{}
 			go rf.sendAppendEntries(i, &args, &reply)
@@ -574,14 +593,14 @@ func (rf *Raft) Leader() {
 							success++
 						}
 					}
-					//超过半数，提交，并更改commitIndex
+					//超过半数，提交给本地机执行，并更改commitIndex
 					if success >= rf.peerNum/2+1 {
 						rf.applyCh <- ApplyMsg{
 							CommandValid: true,
 							Command:      rf.log[i].Command,
 							CommandIndex: i,
 						}
-						rf.commitIndex = 1
+						rf.commitIndex = i
 					}
 				}
 
@@ -602,6 +621,13 @@ func (rf *Raft) Leader() {
 							} else {
 								args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 								args.Entries = rf.log[rf.nextIndex[i]:]
+							}
+						} else {
+							args.PrevLogIndex = len(rf.log) - 1
+							if args.PrevLogIndex == -1 {
+								args.PrevLogTerm = 0
+							} else {
+								args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 							}
 						}
 						reply := AppendEntriesReply{}
