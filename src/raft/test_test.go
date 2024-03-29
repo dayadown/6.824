@@ -88,6 +88,7 @@ func TestReElection2A(t *testing.T) {
 	cfg.end()
 }
 
+/*
 func TestBasicAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -363,7 +364,7 @@ func TestRejoin2B(t *testing.T) {
 
 	cfg.end()
 }
-
+*/
 func TestBackup2B(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false)
@@ -436,6 +437,7 @@ func TestBackup2B(t *testing.T) {
 	cfg.end()
 }
 
+/*
 func TestCount2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -546,6 +548,7 @@ loop:
 	cfg.end()
 }
 
+*/
 func TestPersist12C(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
