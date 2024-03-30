@@ -459,6 +459,7 @@ func (rf *Raft) Follower() {
 	rf.timer = time.NewTimer(rf.overTime)
 	//等待计时器信号或心跳信号
 	for {
+		time.Sleep(10 * time.Millisecond)
 		select {
 		case <-rf.timer.C:
 			{
@@ -508,6 +509,7 @@ func (rf *Raft) Candidate() {
 		}
 	}
 	for {
+		time.Sleep(10 * time.Millisecond)
 		select {
 		case <-rf.timer.C:
 			{
@@ -572,6 +574,7 @@ func (rf *Raft) Leader() {
 	rf.timer = time.NewTimer(rf.overTime)
 
 	for {
+		time.Sleep(10 * time.Millisecond)
 		select {
 		case <-rf.heartBeat: //接受心跳了，转追随者
 			{
