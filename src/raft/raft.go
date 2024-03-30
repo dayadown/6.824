@@ -212,9 +212,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			(meLastLogTerm == args.LastLogTerm && args.LastLogIndex >= meLastLogIndex)) {
 		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term
-		//println(args.CandidateId, "向", rf.me, "请求", "同意了")
 		rf.heartBeat <- struct{}{}
-		//println(args.CandidateId, "向", rf.me, "请求", "同意了且向自己通知了心跳")
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
 		return
@@ -241,10 +239,8 @@ type AppendEntriesArgs struct {
 //对心跳的回复(有日志的话，心跳就附加了传递日志的功能)
 
 type AppendEntriesReply struct {
-	Term           int  //当前的任期号，用于领导人更新自己的任期号
-	Success        bool //是否接受
-	MatchIndex     int  //回复的匹配下标
-	ReplyNextIndex int  //用于快速匹配leader的日志,给leader更新next下标
+	Term    int  //当前的任期号，用于领导人更新自己的任期号
+	Success bool //是否接受
 }
 
 //处理leader发来的心跳动，每来一个心跳就会开一个新的协程运行该函数，需要先来后到处理，所以加互斥锁
@@ -278,21 +274,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				if !(args.Entries == nil) {
 					//println(rf.me, "到头了且日志不为空", len(args.Entries))
 					rf.log = append(rf.log[:1], args.Entries...)
-					reply.MatchIndex = len(rf.log) - 1
-				} else {
-					//日志为空，是心跳
-					//println(rf.me, "日志为空，是心跳")
-					reply.MatchIndex = -1
 				}
 			} else {
 				if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 					//前一日志的任期不匹配
-					i := args.PrevLogIndex
-					for rf.log[i].Term == rf.log[args.PrevLogIndex].Term {
-						i--
-					}
-					reply.ReplyNextIndex = i + 1
-					//println("前一日志的任期不匹配,回复下标为:", i+1)
 					reply.Success = false
 				} else {
 					//前一日志匹配了，追加日志即可
@@ -300,12 +285,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					if !(args.Entries == nil) {
 						//println(rf.me, "日志不为空", len(args.Entries))
 						rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-						reply.MatchIndex = len(rf.log) - 1
-						//println(rf.me, "更新日志匹配下标为", reply.MatchIndex)
-					} else {
-						//日志为空，是心跳
-						//println(rf.me, "日志为空，是心跳")
-						reply.MatchIndex = -1
 					}
 				}
 			}
@@ -350,28 +329,14 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			rf.role = 0
 		} else {
 			if reply.Success {
-				//不是心跳的成功回复,则更新matchIndex，和nextIndex
-				if !(reply.MatchIndex == -1) {
-					//println("更新", server, "的match和next", reply.MatchIndex, reply.MatchIndex+1)
-					rf.nextIndex[server] = reply.MatchIndex + 1
-					rf.matchIndex[server] = reply.MatchIndex
+				if args.Entries != nil {
+					//println("更新", server, "的match和next", args.PrevLogIndex+len(args.Entries), rf.nextIndex[server]+len(args.Entries))
+					rf.nextIndex[server] = rf.nextIndex[server] + len(args.Entries)
+					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 				}
 			} else {
 				//日志有冲突，该服务器的nextIndex递减，下一次心跳向前找第一个不冲突的日志
-				//优化
-				if reply.ReplyNextIndex != 0 {
-					i := args.PrevLogIndex
-					for rf.log[i].Term == args.PrevLogTerm {
-						i--
-					}
-					if i >= reply.ReplyNextIndex {
-						rf.nextIndex[server] = i + 1
-					} else {
-						rf.nextIndex[server] = reply.ReplyNextIndex
-					}
-				} else {
-					rf.nextIndex[server]--
-				}
+				rf.nextIndex[server]--
 			}
 		}
 	}
@@ -413,7 +378,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		return false
 	}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	//println(rf.me, "向", server, "发送投票请求", ok)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if ok && rf.role == 1 {
