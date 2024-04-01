@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"bytes"
 	"math"
 	"math/rand"
 	"sync"
@@ -25,9 +26,7 @@ import (
 import "sync/atomic"
 import "../labrpc"
 import "time"
-
-// import "bytes"
-// import "../labgob"
+import "../labgob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -116,6 +115,14 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -138,6 +145,19 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []Log
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 //
@@ -216,11 +236,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//println(rf.me, "同意", args.CandidateId, "成为领导")
 		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term
+		rf.persist()
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
 		return
 	}
 
+	rf.persist()
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
 }
@@ -242,8 +264,10 @@ type AppendEntriesArgs struct {
 //对心跳的回复(有日志的话，心跳就附加了传递日志的功能)
 
 type AppendEntriesReply struct {
-	Term    int  //当前的任期号，用于领导人更新自己的任期号
-	Success bool //是否接受
+	Term          int  //当前的任期号，用于领导人更新自己的任期号
+	Success       bool //是否接受
+	ConflictTerm  int
+	ConflictIndex int
 }
 
 //处理leader发来的心跳动，每来一个心跳就会开一个新的协程运行该函数，需要先来后到处理，所以加互斥锁
@@ -269,6 +293,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//日志空缺，返回false
 			//println("日志空缺，返回false", args.PrevLogIndex, len(rf.log))
 			reply.Success = false
+			reply.ConflictIndex = len(rf.log)
+			reply.ConflictTerm = -1
 		} else {
 			if args.PrevLogIndex == 0 {
 				//已经到头了，不用查了
@@ -301,6 +327,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					//前一日志的任期不匹配
 					//println("前一日志的任期不匹配", rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
 					reply.Success = false
+					reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+					i := args.PrevLogIndex
+					for rf.log[i].Term == rf.log[args.PrevLogIndex].Term {
+						i--
+					}
+					//02222
+					//022333
+					reply.ConflictIndex = i + 1
 				} else {
 					//前一日志匹配了，依次判断并追加日志
 					reply.Success = true
@@ -331,6 +365,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		rf.heartBeat <- struct{}{} //通知主协程收到了心跳
+		rf.persist()
 	} else { //任期比自己小，拒绝
 		//println(rf.me, "拒绝来自", args.LeaderId, "的心跳")
 		reply.Term = rf.currentTerm
@@ -365,11 +400,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
 			rf.role = 0
+			rf.persist()
 		} else {
 			if reply.Success {
 				if args.Entries != nil {
 					//println("更新", server, "的match和next", args.PrevLogIndex+len(args.Entries), rf.nextIndex[server]+len(args.Entries))
-					rf.nextIndex[server] = rf.nextIndex[server] + len(args.Entries)
+					rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
 					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 					//在matchIndex更新后立即检查是否要更新commitIndex
 					for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
@@ -389,9 +425,32 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 						}
 					}
 				}
+				rf.persist()
 			} else {
 				//日志有冲突，该服务器的nextIndex递减，下一次心跳向前找第一个不冲突的日志
-				rf.nextIndex[server]--
+				//优化
+				if reply.ConflictIndex == 0 {
+					//延迟的错误回复，不用理会
+					return ok
+				}
+				if reply.ConflictTerm == -1 {
+					//日志缺失
+					rf.nextIndex[server] = reply.ConflictIndex
+				} else {
+					conflictIndex := -1
+					for i := args.PrevLogIndex; i > 0; i-- {
+						if rf.log[i].Term == reply.ConflictTerm {
+							conflictIndex = i
+							break
+						}
+					}
+					if conflictIndex != -1 {
+						rf.nextIndex[server] = conflictIndex + 1
+					} else {
+						//找不到冲突的任期则需要把追随者的该任期所有日志截断掉
+						rf.nextIndex[server] = reply.ConflictIndex
+					}
+				}
 			}
 		}
 	}
@@ -441,6 +500,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.currentTerm = reply.Term
 			rf.role = 0
 			rf.votedFor = -1
+			rf.persist()
 			return ok
 		}
 		if reply.VoteGranted {
@@ -497,6 +557,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		})
 		index = len(rf.log) - 1
 		term = rf.currentTerm
+		rf.persist()
 	}
 
 	return index, term, isLeader
@@ -538,6 +599,7 @@ func (rf *Raft) Candidate() {
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.persist()
 	args := RequestVoteArgs{
 		Term:        rf.currentTerm,
 		CandidateId: rf.me,
@@ -749,9 +811,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, rf.peerNum)
 	rf.matchIndex = make([]int, rf.peerNum)
 
-	go rf.Follower() //另起协程初始按追随者状态运行
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	go rf.Follower() //另起协程初始按追随者状态运行
 
 	return rf
 }
