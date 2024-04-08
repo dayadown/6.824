@@ -562,9 +562,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		rf.persist()
 		//提前发送一次附加日志心跳
-		rf.sendHeartOrLogAppend()
-		rf.overTime = time.Duration(100) * time.Millisecond
-		rf.timer = time.NewTimer(rf.overTime)
+		//rf.sendHeartOrLogAppend()
+		//rf.overTime = time.Duration(100) * time.Millisecond
+		//rf.timer = time.NewTimer(rf.overTime)
 	}
 
 	return index, term, isLeader
@@ -714,11 +714,10 @@ func (rf *Raft) Leader() {
 				rf.lastApplied = rf.commitIndex
 				//到了心跳的间隔，发送心跳
 				rf.sendHeartOrLogAppend()
-				rf.mu.Unlock()
 				//重新计时
 				rf.overTime = time.Duration(100) * time.Millisecond
 				rf.timer = time.NewTimer(rf.overTime)
-
+				rf.mu.Unlock()
 				break
 			}
 		default:
