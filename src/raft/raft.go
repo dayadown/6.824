@@ -96,6 +96,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	term = rf.currentTerm
 	isleader = rf.role == 2
 	return term, isleader
@@ -508,7 +510,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		}
 		if *voteNum >= rf.peerNum/2+1 {
 			//有过半的票数
-			rf.role = 2
+			//rf.role = 2
+			go rf.Leader()
 		}
 	}
 	return ok
@@ -558,6 +561,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.log) - 1
 		term = rf.currentTerm
 		rf.persist()
+		//提前发送一次附加日志心跳
+		rf.sendHeartOrLogAppend()
+		rf.overTime = time.Duration(100) * time.Millisecond
+		rf.timer = time.NewTimer(rf.overTime)
 	}
 
 	return index, term, isLeader
@@ -578,7 +585,7 @@ func (rf *Raft) Follower() {
 			{
 				//计时器结束，成为候选者
 				//println(rf.me, "计时器结束，成为候选者")
-				rf.Candidate()
+				go rf.Candidate()
 				return
 			}
 		case <-rf.heartBeat:
@@ -625,24 +632,27 @@ func (rf *Raft) Candidate() {
 		case <-rf.timer.C:
 			{
 				//println(rf.me, "等待要票超时")
-				rf.Candidate()
+				go rf.Candidate()
 				return
 			}
 		case <-rf.heartBeat:
 			{
 				//println(rf.me, "有比自己大的候选者，自己转为追随者")
 				rf.votedFor = -1
-				rf.Follower()
+				go rf.Follower()
 				return
 			}
 		default:
 			{
 				if rf.role == 2 {
 					//println(rf.me, "成功当选")
-					rf.Leader()
+					//rf.Leader()
 					return
 				}
-
+				if rf.role == 0 {
+					go rf.Follower()
+					return
+				}
 			}
 		}
 	}
@@ -686,7 +696,7 @@ func (rf *Raft) Leader() {
 		case <-rf.heartBeat: //接受心跳了，转追随者
 			{
 				//println(rf.me, "有比自己大的，自己从领导转为追随者")
-				rf.Follower()
+				go rf.Follower()
 				return
 			}
 		case <-rf.timer.C:
@@ -703,28 +713,7 @@ func (rf *Raft) Leader() {
 				}
 				rf.lastApplied = rf.commitIndex
 				//到了心跳的间隔，发送心跳
-				//1.若日志的最大索引>=nextIndex[i],则需要向该服务器发送日志信息，否则发送心跳即可
-				for i := 0; i < rf.peerNum; i++ {
-					if i != rf.me {
-						args := AppendEntriesArgs{
-							Term:         rf.currentTerm,
-							LeaderId:     rf.me,
-							LeaderCommit: rf.commitIndex,
-						}
-						if len(rf.log)-1 >= rf.nextIndex[i] {
-							//需要附加日志
-							args.PrevLogIndex = rf.nextIndex[i] - 1
-							args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-							args.Entries = rf.log[rf.nextIndex[i]:]
-						} else {
-							//无须附加日志
-							args.PrevLogIndex = len(rf.log) - 1
-							args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-						}
-						reply := AppendEntriesReply{}
-						go rf.sendAppendEntries(i, &args, &reply)
-					}
-				}
+				rf.sendHeartOrLogAppend()
 				rf.mu.Unlock()
 				//重新计时
 				rf.overTime = time.Duration(100) * time.Millisecond
@@ -735,10 +724,35 @@ func (rf *Raft) Leader() {
 		default:
 			{
 				if rf.role == 0 {
-					rf.Follower()
+					go rf.Follower()
 					return
 				}
 			}
+		}
+	}
+}
+
+func (rf *Raft) sendHeartOrLogAppend() {
+	//1.若日志的最大索引>=nextIndex[i],则需要向该服务器发送日志信息，否则发送心跳即可
+	for i := 0; i < rf.peerNum; i++ {
+		if i != rf.me {
+			args := AppendEntriesArgs{
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				LeaderCommit: rf.commitIndex,
+			}
+			if len(rf.log)-1 >= rf.nextIndex[i] {
+				//需要附加日志
+				args.PrevLogIndex = rf.nextIndex[i] - 1
+				args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+				args.Entries = rf.log[rf.nextIndex[i]:]
+			} else {
+				//无须附加日志
+				args.PrevLogIndex = len(rf.log) - 1
+				args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+			}
+			reply := AppendEntriesReply{}
+			go rf.sendAppendEntries(i, &args, &reply)
 		}
 	}
 }
