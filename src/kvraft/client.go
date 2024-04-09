@@ -56,7 +56,6 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		reply := GetReply{}
 		ok := ck.servers[leaderId].Call("KVServer.Get", &args, &reply)
-		//println(ck.clientId, "发送操作 Get", key, "给", leaderId, "回复是", reply.Err, reply.Value)
 		if ok {
 			switch reply.Err {
 			case OK:

@@ -96,8 +96,6 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	term = rf.currentTerm
 	isleader = rf.role == 2
 	return term, isleader
@@ -661,9 +659,8 @@ func (rf *Raft) Candidate() {
 //领导人状态
 
 func (rf *Raft) Leader() {
-	rf.role = 2
-
 	rf.mu.Lock()
+	rf.role = 2
 	//重置nextIndex和matchIndex
 	for i := 0; i < rf.peerNum; i++ {
 		rf.nextIndex[i] = len(rf.log)

@@ -50,11 +50,8 @@ type KVServer struct {
 func (kv *KVServer) getWaitCh(index int) chan Op {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	ch, exist := kv.indexOpChan[index]
-	if !exist {
-		kv.indexOpChan[index] = make(chan Op, 1)
-		ch = kv.indexOpChan[index]
-	}
+	kv.indexOpChan[index] = make(chan Op, 1)
+	ch := kv.indexOpChan[index]
 	return ch
 }
 
@@ -64,11 +61,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	_, isLeader := kv.rf.GetState()
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
+	//println(args.ClientId, "尝试给", kv.me, "发送Get操作,编号为", args.CommandId)
 
 	op := Op{
 		ClientId:  args.ClientId,
@@ -78,8 +71,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	//调用raft的start函数对日志进行共识
-	index, _, _ := kv.rf.Start(op)
-
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	println(args.ClientId, "给", kv.me, "发送Get操作,编号为", args.CommandId)
 	//根据index创建等待raft通道
 	ch := kv.getWaitCh(index)
 
@@ -91,7 +88,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}()
 
 	// 设置超时ticker
-	timer := time.NewTicker(200 * time.Millisecond)
+	timer := time.NewTicker(300 * time.Millisecond)
 	defer timer.Stop()
 
 	select {
@@ -99,6 +96,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		{
 			if appliedOp.ClientId == args.ClientId && appliedOp.CommandId == args.CommandId {
 				kv.mu.Lock()
+				defer kv.mu.Unlock()
 				_, exist := kv.kvMap[args.Key]
 				if !exist {
 					reply.Err = ErrNoKey
@@ -106,16 +104,16 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 					reply.Err = OK
 					reply.Value = kv.kvMap[args.Key]
 				}
-				kv.mu.Unlock()
 				return
 			} else {
+				//println("提交的不是期待的")
 				reply.Err = ErrWrongLeader
 				return
 			}
 		}
 	case <-timer.C:
 		{
-			//println("1等待超时")
+			//println(args.ClientId, args.CommandId, "等待共识超时")
 			reply.Err = ErrWrongLeader
 			return
 		}
@@ -129,12 +127,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	_, isLeader := kv.rf.GetState()
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
-
 	op := Op{
 		CommandId: args.CommandId,
 		Key:       args.Key,
@@ -144,8 +136,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	//调用raft的start函数对日志进行共识
-	index, _, _ := kv.rf.Start(op)
-
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	println(args.ClientId, "给", kv.me, "发送", args.Op, "操作,编号为", args.CommandId)
 	//根据index创建等待raft通道
 	ch := kv.getWaitCh(index)
 
@@ -157,7 +153,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}()
 
 	// 设置超时ticker
-	timer := time.NewTicker(200 * time.Millisecond)
+	timer := time.NewTicker(300 * time.Millisecond)
 	defer timer.Stop()
 
 	select {
@@ -173,7 +169,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 	case <-timer.C:
 		{
-			//println("2等待超时")
+			//println(args.ClientId, args.CommandId, "等待共识超时")
 			reply.Err = ErrWrongLeader
 			return
 		}
@@ -201,7 +197,12 @@ func (kv *KVServer) applyChanHandler() {
 					kv.mu.Unlock()
 				}
 				//通知操作已经执行
-				kv.getWaitCh(index) <- op
+				kv.mu.Lock()
+				ch, exist := kv.indexOpChan[index]
+				if exist {
+					ch <- op
+				}
+				kv.mu.Unlock()
 			}
 		default:
 			time.Sleep(time.Millisecond * 5)
