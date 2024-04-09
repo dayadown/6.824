@@ -445,7 +445,7 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 	}
 }
 
-/*func TestBasic3A(t *testing.T) {
+func TestBasic3A(t *testing.T) {
 	// Test: one client (3A) ...
 	GenericTest(t, "3A", 1, false, false, false, -1)
 }
@@ -594,7 +594,7 @@ func TestPersistConcurrentUnreliable3A(t *testing.T) {
 	// Test: unreliable net, restarts, many clients (3A) ...
 	GenericTest(t, "3A", 5, true, true, false, -1)
 }
-*/
+
 func TestPersistPartition3A(t *testing.T) {
 	// Test: restarts, partitions, many clients (3A) ...
 	GenericTest(t, "3A", 5, false, true, true, -1)

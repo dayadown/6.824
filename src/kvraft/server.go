@@ -76,7 +76,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	println(args.ClientId, "给", kv.me, "发送Get操作,编号为", args.CommandId)
+	//println(args.ClientId, "给", kv.me, "发送Get操作,编号为", args.CommandId)
 	//根据index创建等待raft通道
 	ch := kv.getWaitCh(index)
 
@@ -141,7 +141,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	println(args.ClientId, "给", kv.me, "发送", args.Op, "操作,编号为", args.CommandId)
+	//println(args.ClientId, "给", kv.me, "发送", args.Op, "操作,编号为", args.CommandId)
 	//根据index创建等待raft通道
 	ch := kv.getWaitCh(index)
 
@@ -178,6 +178,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 func (kv *KVServer) applyChanHandler() {
 	for {
+		if kv.killed() {
+			return
+		}
 		select {
 		case applyMsg := <-kv.applyCh:
 			{
@@ -204,8 +207,6 @@ func (kv *KVServer) applyChanHandler() {
 				}
 				kv.mu.Unlock()
 			}
-		default:
-			time.Sleep(time.Millisecond * 5)
 		}
 
 	}
@@ -272,7 +273,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.indexOpChan = make(map[int]chan Op)
 	kv.kvMap = make(map[string]string)
 
-	kv.applyCh = make(chan raft.ApplyMsg)                 //用于接收raft层传来的信息
+	kv.applyCh = make(chan raft.ApplyMsg, len(servers))   //用于接收raft层传来的信息
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh) //该server绑定的raft层
 
 	// You may need initialization code here.
